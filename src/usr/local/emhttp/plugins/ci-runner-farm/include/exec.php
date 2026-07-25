@@ -21,8 +21,9 @@ $action  = $_REQUEST['action'] ?? 'status-json';
 // Which fleet this request is for. Same regex the engine enforces — validate here too
 // so a crafted value can never reach a path or a shell argument. Fleet `default` is the
 // legacy install, so a request with no fleet param behaves exactly as it did before.
+const FLEET_NAME_RE = '/^[a-z][a-z0-9-]{0,30}$/';   // same shape the engine enforces
 $fleet = $_REQUEST['fleet'] ?? 'default';
-if (!preg_match('/^[a-z][a-z0-9-]{0,30}$/', $fleet)) {
+if (!preg_match(FLEET_NAME_RE, $fleet)) {
   http_response_code(400);
   echo json_encode(['ok' => false, 'error' => 'bad fleet']);
   exit;
@@ -34,6 +35,10 @@ $CMD = escapeshellarg($SCRIPT) . ' --fleet ' . escapeshellarg($fleet);
 // with the engine's default-fleet prefix — tests/config-parity.sh asserts it.
 $namePrefix = 'ci-runner';
 $nameRe = '/^' . preg_quote($fleet === 'default' ? $namePrefix : "$namePrefix-$fleet", '/') . '-[0-9]+$/';
+// The editable Dockerfile is per fleet, alongside that fleet's cfg.
+function dockerfile_path($cfgdir, $fleet) {
+  return $fleet === 'default' ? "$cfgdir/Dockerfile" : "$cfgdir/fleets/$fleet.Dockerfile";
+}
 
 function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [implode("\n", $out), $rc]; }
 // For actions whose stdout is a JSON body the frontend parses: keep stderr OUT of
@@ -112,7 +117,7 @@ switch ($action) {
     break;
 
   case 'get-dockerfile':
-    $df = $fleet === 'default' ? "$CFGDIR/Dockerfile" : "$CFGDIR/fleets/$fleet.Dockerfile";
+    $df = dockerfile_path($CFGDIR, $fleet);
     if (!is_file($df)) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
     echo json_encode(['ok' => true, 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
@@ -120,7 +125,7 @@ switch ($action) {
   case 'save-dockerfile':
     $content = $_REQUEST['dockerfile'] ?? '';
     if (trim($content) === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
-    $df = $fleet === 'default' ? "$CFGDIR/Dockerfile" : "$CFGDIR/fleets/$fleet.Dockerfile";
+    $df = dockerfile_path($CFGDIR, $fleet);
     @mkdir(dirname($df), 0755, true);
     file_put_contents($df, $content);
     echo json_encode(['ok' => true, 'action' => 'save-dockerfile']);
@@ -204,7 +209,7 @@ switch ($action) {
 
   case 'fleet-create': case 'fleet-delete':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^[a-z][a-z0-9-]{0,30}$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($n));
     $j = last_json($out);
     echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => $action]);
@@ -212,7 +217,7 @@ switch ($action) {
 
   case 'fleet-rename':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^[a-z][a-z0-9-]{0,30}$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleet-rename ' . escapeshellarg($fleet) . ' ' . escapeshellarg($n));
     $j = last_json($out);
     echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'fleet-rename']);
