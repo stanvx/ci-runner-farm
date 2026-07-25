@@ -59,21 +59,18 @@ your min when things go quiet.
 
 ## Install
 
-### Community Applications (recommended)
-
-Search for **CI Runner Farm** in [Community Applications](https://unraid.net/community/apps)
-and click **Install**.
-
-### Install by URL
-
 In the Unraid webGUI go to **Plugins → Install Plugin** and paste:
 
 ```
-https://github.com/unraid/ci-runner-farm/releases/latest/download/ci-runner-farm.plg
+https://github.com/stanvx/ci-runner-farm/releases/latest/download/ci-runner-farm.plg
 ```
 
-Unraid always resolves this to the newest published release, and its built-in
-"check for updates" keeps the plugin current.
+Unraid always resolves this to the newest published release from this
+repository, and its built-in "check for updates" keeps the plugin current.
+
+This fork installs by URL only. It is not listed in Community Applications —
+`community-applications/` holds the upstream listing material and is not used
+here.
 
 ---
 
@@ -255,13 +252,26 @@ deploy.sh                          dev-only raw deploy to an Unraid host
 release-please-config.json         release-please configuration
 .release-please-manifest.json      SemVer source of truth
 VERSION                            mirror of the internal SemVer version
-src/usr/local/emhttp/plugins/ci-runner-farm/
-  RunnerFarm.page                  Settings page (Dynamix)
-  default.cfg                      seed config
+src/usr/local/emhttp/plugins/ci-runner-farm/   mirrors the install path exactly
+  RunnerFarm.page                  xmenu container (Settings -> Utilities)
+  RunnerFarmFleet.page             Fleet tab — run and watch
+  RunnerFarmImage.page             Runner image tab — build
+  RunnerFarmSettings.page          Settings tab — configure
+  RunnerFarmDashboard.page         optional Dashboard widget
+  default.cfg                      reference defaults (not seeded to flash)
   default.Dockerfile               generic starter runner image
-  include/runner-farm.sh           provisioning/control script
+  include/runner-farm.sh           engine: provisioning/control script
   include/exec.php                 CSRF-guarded web endpoint
+  include/crf-core.php             shared JS core + .crf-* styles
+  nchan/ci_runner_farm             Dashboard push channel
+  event/                           emhttpd docker start/stop hooks
+tests/
+  config-parity.sh                 defaults agree across engine, cfg, UI
+  safe-paths.sh                    path-guard unit tests
+docs/RELEASING.md                  release process and its invariants
+community-applications/            upstream CA listing material (unused by this fork)
 .github/workflows/
+  lint.yml                         bash -n / php -l + tests
   package-plugins.yml              PR/branch build + validate
   release-please.yml               release automation + asset upload
   release.yml                      tagged-release validation
@@ -271,4 +281,7 @@ src/usr/local/emhttp/plugins/ci-runner-farm/
 
 ## Support
 
-Questions and bug reports: <https://github.com/unraid/ci-runner-farm/issues>
+Questions and bug reports: <https://github.com/stanvx/ci-runner-farm/issues>
+
+This is a fork of [unraid/ci-runner-farm](https://github.com/unraid/ci-runner-farm).
+Issues with the upstream plugin belong there.
