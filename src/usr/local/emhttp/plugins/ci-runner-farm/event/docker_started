@@ -13,6 +13,10 @@
 # refills the fleet to its floor, and relaunches the autoscale/image-update
 # daemons. It is idempotent and a no-op until a GitHub token is configured.
 #
+# Called WITHOUT --fleet, so boot-autostart fans out over every configured fleet.
+#
+# Called WITHOUT --fleet, so boot-autostart fans out over every configured fleet.
+#
 # Detached so we never block Unraid's start sequence.
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
 CFGDIR="/boot/config/plugins/ci-runner-farm"

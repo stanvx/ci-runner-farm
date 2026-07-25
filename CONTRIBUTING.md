@@ -14,6 +14,7 @@ There is no build step, package manager, or lockfile. Run what CI runs:
 ```sh
 bash tests/config-parity.sh    # defaults agree across engine, default.cfg, and the UI
 bash tests/safe-paths.sh       # path-guard unit tests
+bash tests/fleet-resolve.sh    # fleet config layering, derived names, firewall tags
 bash -n <file>.sh              # every shell script must parse
 php -l <file>.php              # every PHP file and .page containing <?php must parse
 ```

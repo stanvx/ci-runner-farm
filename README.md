@@ -199,8 +199,22 @@ for the full picture.
 Everything in the UI maps to the control script:
 
 ```
-include/runner-farm.sh {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-*}
+include/runner-farm.sh [--fleet <name>] {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-*}
+include/runner-farm.sh {fleets-json|fleet-create <name>|fleet-rename <old> <new>|fleet-delete <name>}
 ```
+
+One install can host several named fleets side by side. `--fleet` selects one
+(`CRF_FLEET` does the same); omit it and you get `default`, which **is** the
+original single-fleet install — same container names, same network, same config
+file, so upgrading changes nothing.
+
+A fleet's own settings live in
+`/boot/config/plugins/ci-runner-farm/fleets/<name>.cfg`. Host-wide settings
+(`CACHE_ROOT`, `SHARED_IMAGE_CACHE`, `MIRROR_PORT`, `REGISTRY_*`,
+`DASHBOARD_WIDGET_ENABLE`) always come from the main `ci-runner-farm.cfg` — one
+cache root, one pull-through mirror and one registry login serve the whole box.
+Verbs invoked without `--fleet` that are box-level (`boot-autostart`,
+`autoscale-stop`, `imageupdate-stop`, `dashboard-json`) fan out over every fleet.
 
 ---
 
@@ -268,6 +282,7 @@ src/usr/local/emhttp/plugins/ci-runner-farm/   mirrors the install path exactly
 tests/
   config-parity.sh                 defaults agree across engine, cfg, UI
   safe-paths.sh                    path-guard unit tests
+  fleet-resolve.sh                 fleet config layering, derived names, fw tags
 CONTRIBUTING.md                    dev setup, local checks, commit conventions
 SECURITY.md                        private vulnerability reporting + scope
 docs/RELEASING.md                  release process and its invariants
