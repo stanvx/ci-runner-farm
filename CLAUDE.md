@@ -75,6 +75,23 @@ Full process: @docs/RELEASING.md. The rules that matter while editing:
   the repo root use `set -euo pipefail`.
 - Mutating engine subcommands go through `with_fleet_lock wait`.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `stanvx/ci-runner-farm` (this fork), via the `gh` CLI. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.
+
 ## Git
 
 This is a fork. `origin` is `stanvx/ci-runner-farm`; the parent is
