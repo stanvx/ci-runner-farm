@@ -268,6 +268,8 @@ src/usr/local/emhttp/plugins/ci-runner-farm/   mirrors the install path exactly
 tests/
   config-parity.sh                 defaults agree across engine, cfg, UI
   safe-paths.sh                    path-guard unit tests
+CONTRIBUTING.md                    dev setup, local checks, commit conventions
+SECURITY.md                        private vulnerability reporting + scope
 docs/RELEASING.md                  release process and its invariants
 community-applications/            upstream CA listing material (unused by this fork)
 .github/workflows/
@@ -282,6 +284,11 @@ community-applications/            upstream CA listing material (unused by this 
 ## Support
 
 Questions and bug reports: <https://github.com/stanvx/ci-runner-farm/issues>
+
+Security issues: please report privately — see [SECURITY.md](SECURITY.md).
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the local
+checks, the config-defaults rule, and commit conventions.
 
 This is a fork of [unraid/ci-runner-farm](https://github.com/unraid/ci-runner-farm).
 Issues with the upstream plugin belong there.
