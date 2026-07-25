@@ -12,6 +12,13 @@
     A  Selector    one fleet at a time, pill picker, today's layout scoped to it
     B  Master rail fleet list on the left, detail + inline config on the right
     C  Stacked     every fleet on screen at once, per-fleet cards, settings accordion
+    D  Product     the round-2 design: three separated layers (navigation / operational
+                   status / configuration), calculated security posture, one primary
+                   state-dependent action, three consolidated metric cards, and
+                   task-oriented settings. D also uses the corrected colour semantics
+                   (green healthy, blue active, amber degraded, red failed, grey
+                   stopped) — A/B/C keep the shipped orange-means-busy, deliberately,
+                   so the two readings can be compared side by side.
 
   Fake data only. No backend, no mutations — buttons are dead. Runs standalone:
       open prototype/multi-fleet.html
@@ -105,6 +112,101 @@
   .crfw-foot>span{flex:1;min-width:0}
   .widget a{color:var(--link-text-color);text-decoration:none;white-space:nowrap}
 
+  /* --- variant D only. Colour means HEALTH; nothing else gets to be coloured. --- */
+  .d-healthy{background:#4caf50}.d-active{background:#3ba7e0}.d-degraded{background:#e0a53b}
+  .d-failed{background:#e22828}.d-stopped{background:#7d7d7d}
+  .d-dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;vertical-align:baseline}
+  .d-shell{display:flex;gap:0;border:1px solid var(--border-color);border-radius:8px;overflow:hidden}
+  .d-rail{width:230px;flex:none;background:var(--shade-bg-color);border-right:1px solid var(--border-color);padding:10px 0}
+  .d-rail-h{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--alt-text-color);padding:0 14px 8px}
+  .d-rail-row{display:flex;align-items:center;gap:9px;padding:7px 14px;cursor:pointer;border-left:3px solid transparent}
+  .d-rail-row:hover{background:var(--hover-table-row-background-color)}
+  .d-rail-row.on{background:var(--hover-table-row-background-color);border-left-color:var(--link-text-color)}
+  .d-rail-n{flex:1;font-size:13px}
+  .d-mode{font-size:11px;color:var(--alt-text-color)}
+  .d-rail-add{padding:10px 14px 2px}.d-rail-add button{width:100%}
+  .d-main{flex:1;min-width:0;padding:16px 18px}
+  .d-id{display:flex;align-items:flex-start;gap:16px}
+  .d-title{font-size:21px;font-weight:600;margin:0}
+  .d-sub{font-size:12.5px;color:var(--alt-text-color);margin-top:2px}
+  .d-statusline{display:flex;align-items:center;gap:7px;font-size:13px;margin-top:8px}
+  .d-sep{color:var(--alt-text-color)}
+  .d-actions{display:flex;align-items:flex-start;gap:8px}
+  .d-primary{font-weight:600;border-width:1px}
+  .d-primary.go{background:#2f7d33;border-color:#2f7d33;color:#fff}
+  .d-primary.warn{background:#b8791a;border-color:#b8791a;color:#fff}
+  .d-primary.normal{background:var(--input-bg-color);border-color:var(--alt-text-color)}
+  .d-menu{position:relative}
+  .d-menu-list{position:absolute;right:0;top:34px;background:var(--background-color);border:1px solid var(--border-color);border-radius:6px;min-width:210px;padding:4px 0;font-size:12.5px;box-shadow:0 8px 22px rgba(0,0,0,.4);z-index:5}
+  .d-menu-list span{display:block;padding:5px 12px;cursor:pointer}
+  .d-menu-list span:hover{background:var(--hover-table-row-background-color)}
+  .d-menu-list span.danger{color:var(--crf-err)}
+  .d-attrs{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 10px}
+  .d-attrs span{font-size:11.5px;color:var(--alt-text-color);border:1px solid var(--border-color);border-radius:4px;padding:1px 8px}
+  .d-alert{border:1px solid var(--border-color);border-left-width:3px;border-radius:6px;padding:10px 12px;margin:0 0 10px;font-size:13px;display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+  .d-alert b{font-size:13px}
+  .d-alert button{margin-top:5px}
+  .d-alert.attention{border-left-color:#e0a53b;background:color-mix(in srgb,#e0a53b 9%,var(--background-color))}
+  .d-alert.degraded{border-left-color:#e0a53b;background:color-mix(in srgb,#e0a53b 9%,var(--background-color))}
+  .d-alert.strong{border-left-color:#4caf50;background:color-mix(in srgb,#4caf50 7%,var(--background-color))}
+  .d-alert.strong div{display:flex;flex-wrap:wrap;gap:5px}
+  .d-pill{font-size:11px;border:1px solid var(--border-color);border-radius:10px;padding:1px 8px;color:var(--alt-text-color)}
+  .d-pill.ok{color:#4caf50;border-color:#4caf50}
+  .d-pill.warn{color:#e0a53b;border-color:#e0a53b}
+  .d-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 12px}
+  .d-card{border:1px solid var(--border-color);border-radius:8px;padding:12px 14px;background:var(--shade-bg-color)}
+  .d-card.urgent{border-color:#e0a53b}
+  .d-card-t{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--alt-text-color)}
+  .d-card-v{font-size:19px;font-weight:600;margin:4px 0 2px}
+  .d-card-s{font-size:12.5px;color:var(--alt-text-color)}
+  .d-card-x{font-size:12px;color:var(--alt-text-color);margin-top:8px;line-height:1.5}
+  .d-card-x.amber{color:#e0a53b}
+  .d-meter{height:6px;border-radius:3px;background:var(--border-color);overflow:hidden;margin:8px 0 0}
+  .d-meter>span{display:block;height:100%;background:#3ba7e0}
+  .d-meter.thin{height:4px;margin-top:4px;width:90px}
+  .d-tbl{border:1px solid var(--border-color);border-radius:8px;overflow:hidden}
+  .d-tr{display:grid;grid-template-columns:minmax(130px,1fr) 130px minmax(200px,2fr) 150px 130px;gap:10px;align-items:center;padding:8px 12px;border-top:1px solid var(--table-border-color);font-size:13px;cursor:pointer}
+  .d-tr:first-child{border-top:none}
+  .d-tr:hover:not(.d-th){background:var(--hover-table-row-background-color)}
+  .d-tr.on{background:var(--hover-table-row-background-color)}
+  .d-th{background:var(--table-header-background-color);font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--alt-text-color);cursor:default}
+  .d-job{font-size:12.5px;line-height:1.4}
+  .d-res{font-size:12.5px;font-family:bitstream,monospace}
+  .d-panel{border-top:1px solid var(--table-border-color);background:var(--shade-bg-color);padding:10px 14px;font-size:12.5px}
+  .d-panel>div{display:flex;gap:10px;padding:2px 0}
+  .d-panel>div>span:first-child{width:130px;color:var(--alt-text-color);flex:none}
+  .d-panel-log{display:block!important;white-space:pre-wrap;font-family:bitstream,monospace;font-size:11.5px;color:var(--alt-text-color);border:1px solid var(--border-color);border-radius:5px;padding:6px 8px;margin-top:8px}
+  .d-panel-act{gap:8px!important;margin-top:8px}
+  .d-settings{max-width:780px}
+  .d-acc{border:1px solid var(--border-color);border-radius:8px;overflow:hidden}
+  .d-acc-h{display:flex;justify-content:space-between;padding:10px 14px;border-top:1px solid var(--table-border-color);cursor:pointer;font-size:13.5px}
+  .d-acc-h:first-child{border-top:none}
+  .d-acc-h.on{background:var(--table-header-background-color);font-weight:600}
+  .d-acc-b{padding:10px 14px 14px;border-top:1px solid var(--table-border-color)}
+  .d-acc-b .fld label{width:34%}
+  .d-radio{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-color);width:auto;text-align:left}
+  .d-radio input{flex:none;width:auto}
+  .d-unit{font-size:12px;color:var(--alt-text-color)}
+  .d-note{font-size:12px;color:var(--alt-text-color);border-left:2px solid var(--border-color);padding:2px 0 2px 10px;margin:10px 0 2px;line-height:1.5}
+  .d-locked{font-size:12.5px;color:var(--alt-text-color);font-style:italic}
+  .d-secgrid{display:flex;flex-direction:column}
+  .d-secrow{display:grid;grid-template-columns:150px 190px 1fr;gap:10px;padding:5px 0;border-top:1px solid var(--table-border-color);font-size:12.5px;align-items:baseline}
+  .d-secrow:first-child{border-top:none}
+  .d-seck{color:var(--alt-text-color)}
+  .d-secv.ok{color:#4caf50}.d-secv.bad{color:#e0a53b}
+  .d-secwhy{color:var(--alt-text-color);font-size:11.5px}
+  .d-save{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+  .d-wiz{border:1px solid var(--border-color);border-radius:8px;padding:14px}
+  .d-wiz-steps{display:flex;gap:14px;font-size:12px;color:var(--alt-text-color);flex-wrap:wrap}
+  .d-wiz-steps .done{color:#4caf50}.d-wiz-steps .on{color:var(--text-color);font-weight:600}
+  .d-wiz-sum{font-size:13.5px;line-height:1.6;margin:12px 0 0}
+  .d-wsum{font-size:.85rem;margin:6px 0 4px}
+  .d-wcounts{display:flex;gap:12px;font-size:.75rem;color:var(--alt-text-color);margin-bottom:8px;flex-wrap:wrap}
+  .d-wcounts span{display:flex;align-items:center;gap:5px}
+  .d-wrow{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:.8rem;border-top:1px solid var(--table-border-color)}
+  .d-wrow .crf-name{font-size:11.5px}
+  @media(max-width:1100px){.d-rail{display:none}.d-cards{grid-template-columns:1fr}}
+
   /* switcher */
   #sw{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:9999;display:flex;align-items:center;gap:2px;background:#111;color:#fff;border:1px solid #555;border-radius:999px;padding:4px 6px;box-shadow:0 6px 24px rgba(0,0,0,.5);font-size:13px}
   #sw button{background:none;border:none;color:#fff;padding:4px 10px;border-radius:999px}
@@ -121,36 +223,149 @@
 const FLEETS = [
   { id:'default', mode:'legacy', state:'running', up:4, busy:2, idle:2, queued:3,
     configured:4, autoscale:'off', count:4, labels:'self-hosted,unraid,build', group:'',
-    ephemeral:'false', mem:'16g', cache:'41.2G' },
+    ephemeral:'false', mem:'16g', cache:'41.2G',
+    desc:'Legacy runner fleet · Local Unraid executor', updated:8, queueOldest:10,
+    executor:'unraid', profile:'Full Docker integration', privileged:true, sock:false,
+    netiso:'off', publicRepos:false, sharedCache:true, pinned:false, auth:'pat',
+    org:'trent-example', repoAccess:'6 selected repositories', runnerGroup:'Private CI',
+    cpus:2, memGb:16, timeout:60, workspace:12, cacheUsed:41.2, cacheLimit:80 },
+
   { id:'arm-builds', mode:'legacy', state:'stopped', up:0, busy:0, idle:0, queued:0,
     configured:2, autoscale:'off', count:2, labels:'self-hosted,arm64', group:'',
-    ephemeral:'false', mem:'8g', cache:'2.1G' },
+    ephemeral:'false', mem:'8g', cache:'2.1G',
+    desc:'Legacy runner fleet · Local Unraid executor', updated:1420, queueOldest:0,
+    executor:'unraid', profile:'Container build', privileged:true, sock:false,
+    netiso:'isolate', publicRepos:false, sharedCache:false, pinned:false, auth:'pat',
+    org:'trent-example', repoAccess:'2 selected repositories', runnerGroup:'Private CI',
+    cpus:2, memGb:8, timeout:60, workspace:8, cacheUsed:2.1, cacheLimit:40 },
+
   { id:'org-scaleset', mode:'scaleset', state:'running', up:5, busy:5, idle:0,
     assigned:6, session:'connected', lastMsg:8, scaleSet:'unraid-x64', group:'Default',
-    labels:'from scale set', max:12, mem:'16g' },
+    labels:'from scale set', max:12, mem:'16g',
+    desc:'Runner scale set · Isolated VM executor', updated:8, queueOldest:2,
+    executor:'vm', agent:'ci-runner-vm-01', profile:'Restricted build', privileged:false,
+    sock:false, netiso:'strict', publicRepos:false, sharedCache:false, pinned:true,
+    auth:'app', org:'trent-example', repoAccess:'organisation-wide', runnerGroup:'Default',
+    ephemeral:'true', min:0, warm:1, cpus:4, memGb:16, timeout:90, workspace:20,
+    cacheUsed:12.4, cacheLimit:60 },
+
   { id:'heavy-gpu', mode:'scaleset', state:'running', up:1, busy:0, idle:1,
     assigned:0, session:'stale', lastMsg:247, scaleSet:'gpu-builders', group:'restricted',
-    labels:'from scale set', max:4, mem:'48g' },
+    labels:'from scale set', max:4, mem:'48g',
+    desc:'Runner scale set · Isolated VM executor', updated:247, queueOldest:0,
+    executor:'vm', agent:'ci-runner-vm-02', profile:'GPU workload', privileged:true,
+    sock:false, netiso:'isolate', publicRepos:false, sharedCache:false, pinned:true,
+    auth:'app', org:'trent-example', repoAccess:'1 selected repository', runnerGroup:'restricted',
+    ephemeral:'true', min:0, warm:0, cpus:8, memGb:48, timeout:180, workspace:60,
+    cacheUsed:6.8, cacheLimit:120 },
+
   { id:'playwright', mode:'legacy', state:'running', up:8, busy:6, idle:2, queued:0,
     configured:8, autoscale:'on · 2–16', count:8, labels:'self-hosted,unraid,e2e', group:'',
-    ephemeral:'true', mem:'8g', cache:'18.7G' },
+    ephemeral:'true', mem:'8g', cache:'18.7G',
+    desc:'Legacy runner fleet · Local Unraid executor', updated:4, queueOldest:0,
+    executor:'unraid', profile:'Container build', privileged:false, sock:false,
+    netiso:'isolate', publicRepos:false, sharedCache:false, pinned:true, auth:'pat',
+    org:'trent-example', repoAccess:'3 selected repositories', runnerGroup:'Private CI',
+    cpus:2, memGb:8, timeout:45, workspace:12, cacheUsed:18.7, cacheLimit:60 },
 ];
 
-const JOBS = ['build (ubuntu-latest)','e2e / chromium','lint','docker · publish','unit tests','typecheck'];
+const JOBS = [
+  {repo:'trent/repo-a',    wf:'Lint',                    branch:'main'},
+  {repo:'trent/repo-b',    wf:'Publish container',       branch:'main'},
+  {repo:'trent/webapp',    wf:'End-to-end · chromium',   branch:'feat/checkout'},
+  {repo:'trent/repo-a',    wf:'Unit tests',              branch:'renovate/deps'},
+  {repo:'trent/infra',     wf:'Typecheck',               branch:'main'},
+  {repo:'trent/webapp',    wf:'Build (ubuntu-latest)',   branch:'main'},
+];
 function runners(f){
   const out=[];
   for(let i=1;i<=Math.max(f.up, f.mode==='legacy'?f.configured:f.up);i++){
     const running=i<=f.up, busy=running && i<=f.busy;
+    const j=JOBS[(i+f.id.length)%JOBS.length];
     out.push({
       name:(f.mode==='scaleset'? f.scaleSet+'-'+(1000+i) : f.id+'-'+i),
       phase: running ? (busy?'busy':'idle') : 'exited',
-      job: busy ? JOBS[(i+f.id.length)%JOBS.length] : (running?'waiting for jobs':'exited'),
-      cpu: busy ? 40+((i*23)%55) : (running?2:0),
+      job: busy ? j.wf.toLowerCase() : (running?'waiting for jobs':'exited'),
+      repo: busy?j.repo:'', wf: busy?j.wf:'', branch: busy?j.branch:'',
+      cpu: busy ? 40+((i*23)%55) : (running?1:0),
+      memUsed: busy ? +(1.5+((i*2.7)%(f.memGb*0.6))).toFixed(1) : (running?0.6:0),
       el: busy ? (3+i*7)+'m' : '',
+      id: (f.mode==='scaleset'?'jit-':'reg-')+(4200+i*17),
+      digest: 'sha256:9f2c'+(1000+i*7)+'…',
+    });
+  }
+  /* Scale-set only: jobs assigned by GitHub that have no container yet. This is the
+     starved case the aggregate "up" count hides completely. */
+  if(f.mode==='scaleset' && f.assigned>f.up){
+    for(let k=0;k<f.assigned-f.up;k++) out.push({
+      name:'—', phase:'pending', job:'provisioning', repo:JOBS[k%JOBS.length].repo,
+      wf:JOBS[k%JOBS.length].wf, branch:JOBS[k%JOBS.length].branch,
+      cpu:0, memUsed:0, el:'', id:'', digest:'',
     });
   }
   return out;
 }
+
+/* ---- variant D derivations: everything below is CALCULATED from the fleet's
+   configuration, never stored, so the operator can't disagree with it. ---- */
+
+/* One health colour per fleet. Mode is a separate badge — never a colour. */
+function health(f){
+  if(f.state==='stopped') return 'stopped';
+  if(alerts(f).length)    return 'degraded';
+  if(f.busy>0)            return 'active';
+  return 'healthy';
+}
+const HEALTH_LABEL = {healthy:'Healthy', active:'Running', degraded:'Degraded', failed:'Failed', stopped:'Stopped'};
+
+/* Security posture. Each check is (condition, what it means), and the fleet's level
+   is the worst of them. "Locked" checks are ones the execution profile enforces —
+   they render as a value the operator cannot toggle, not as a warning. */
+function posture(f){
+  const good=[], bad=[];
+  /* `clause` is the risk written as a sentence fragment, so the banner can read like
+     a sentence instead of a dump of nine field names. */
+  const chk=(ok,label,value,why,clause)=> (ok?good:bad).push({label,value,why,clause});
+  chk(f.ephemeral==='true', 'Runner lifetime', f.ephemeral==='true'?'Ephemeral':'Persistent',
+      'Jobs may retain state between runs.', 'persistent runners are enabled');
+  chk(f.executor==='vm', 'Executor', f.executor==='vm'?`Isolated VM · ${f.agent}`:'Local Unraid host',
+      'Jobs run on the same host as your array and containers.', 'jobs run on the local Unraid host');
+  chk(!f.privileged, 'Privileged mode', f.privileged?'Enabled (Docker-in-Docker)':'Blocked',
+      'A privileged container is root-equivalent on its host.', 'privileged mode is enabled');
+  chk(!f.sock, 'Host Docker socket', f.sock?'Shared':'Blocked',
+      'Sharing the socket gives jobs control of every container on the host.', 'the host Docker socket is shared');
+  chk(f.netiso!=='off', 'Network isolation', f.netiso==='strict'?'Strict':f.netiso==='isolate'?'Dedicated bridge':'Disabled',
+      'Jobs can reach other local services and the LAN.', 'network isolation is disabled');
+  chk(!f.publicRepos, 'Public repositories', f.publicRepos?'Allowed':'Blocked',
+      'Fork pull requests would run untrusted code on this fleet.', 'public repositories are allowed');
+  chk(!f.sharedCache, 'Package caches', f.sharedCache?'Shared and writable':'Scoped per repository',
+      'One repository can poison another repository’s dependencies.', 'package caches are shared and writable');
+  chk(f.pinned, 'Runner image', f.pinned?'Pinned digest':'Floating tag',
+      'A moving tag can change what executes without a config change.', 'the runner image uses a floating tag');
+  chk(f.auth==='app', 'Authentication', f.auth==='app'?'GitHub App':'Personal access token',
+      'A PAT carries one person’s access and does not rotate.', 'authentication uses a personal access token');
+  return {level: bad.length?'attention':'strong', good, bad};
+}
+
+/* One primary action per state; everything else lives in the overflow menu. */
+function primary(f){
+  const h=health(f);
+  if(h==='stopped')  return {label:'Start fleet', kind:'go'};
+  if(h==='degraded') return {label:'Review issue', kind:'warn'};
+  return {label:'Drain and stop', kind:'normal'};
+}
+const SECONDARY = ['Restart after active jobs','Force stop…','Run preflight validation','View logs','Delete fleet…'];
+
+/* The short "what is this, where does it run, how risky" line under the title. */
+function attrs(f){
+  return [
+    f.ephemeral==='true' ? 'Ephemeral runners' : 'Persistent runners',
+    f.executor==='vm' ? `Isolated VM · ${f.agent}` : 'Local Unraid host',
+    f.mode==='scaleset' ? 'Automatic capacity' : (f.autoscale==='off'?'Manual capacity':'Automatic capacity'),
+    f.publicRepos ? 'Public repositories allowed' : 'Private repositories only',
+  ];
+}
+const ago = s => s<60 ? s+' seconds ago' : s<3600 ? Math.round(s/60)+' minutes ago' : Math.round(s/3600)+' hours ago';
 /* Which fleets are unhappy — the thing the dashboard has to resolve when fleets
    disagree. Deliberately NOT "has queued jobs": a queue is normal operation, and
    flagging it would make every busy fleet red. */
@@ -466,26 +681,280 @@ function VariantC(sel){
   </div>`;
 }
 
+/* =================================================================== VARIANT D
+   Round 2. Three separated layers: fleet NAVIGATION (left rail), OPERATIONAL
+   STATUS (identity header, posture, three cards, runner table), CONFIGURATION
+   (a narrow task-oriented settings column, well below the fold).
+
+   Differences that carry the argument:
+   - One primary action, chosen by state; consequential ones are in the overflow.
+   - Security posture is calculated from config and shown before any metric.
+   - Six metric cards collapse to Capacity / Queue / Storage; autoscale moves into
+     the capacity control because it is configuration, not a measurement.
+   - Colour means health only: green healthy, blue active, amber degraded, red
+     failed, grey stopped. Mode is a badge with no colour of its own.
+   - The runner table names the repository, the workflow and the ref, and
+     scale-set rows use real lifecycle states including assigned-but-unprovisioned. */
+function VariantD(sel, sec, openRunner, menuOpen){
+  const f = FLEETS.find(x=>x.id===sel) || FLEETS[0];
+  const h = health(f), p = posture(f), prim = primary(f), a = alerts(f);
+  const auto = f.mode==='scaleset' || f.autoscale!=='off';
+  const rs = runners(f);
+
+  const card = (title, big, sub, extra='') =>
+    `<div class="d-card"><div class="d-card-t">${title}</div><div class="d-card-v">${big}</div>
+     <div class="d-card-s">${sub}</div>${extra}</div>`;
+
+  const secs = {
+    'General':`
+      <div class="fld"><label>Fleet name</label><div class="val"><input value="${esc(f.id)}"></div></div>
+      <div class="fld"><label>Description</label><div class="val"><input value="${esc(f.desc)}"></div></div>
+      <div class="fld"><label>Status</label><div class="val"><span class="d-dot d-${h}"></span> ${HEALTH_LABEL[h]}</div></div>
+      <div class="fld"><label>Mode</label><div class="val" style="flex-direction:column;align-items:flex-start;gap:6px">
+        <span>${f.mode==='scaleset'?'Runner scale set (JIT)':'Legacy registration runners'}</span>
+        ${f.mode==='legacy'?`<button>Migrate to runner scale set</button>
+        <span class="d-note">A migration, not a setting — it changes credentials, runner identity and lifecycle behaviour, so it runs as a guided flow.</span>`:''}
+      </div></div>`,
+    'GitHub access':`
+      <div class="fld"><label>Organisation</label><div class="val"><input value="${esc(f.org)}"></div></div>
+      <div class="fld"><label>Runner group</label><div class="val"><input value="${esc(f.runnerGroup)}"></div></div>
+      <div class="fld"><label>Repository access</label><div class="val"><span>${esc(f.repoAccess)}</span><button>Choose repositories</button></div></div>
+      <div class="fld"><label>Authentication</label><div class="val">${f.auth==='app'
+        ? '<span class="d-pill ok">GitHub App connected</span>'
+        : '<span class="d-pill warn">Personal access token</span><button>Connect a GitHub App</button>'}</div></div>`,
+    'Execution':`
+      <div class="fld"><label>Execution backend</label><div class="val" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <label class="d-radio"><input type="radio" name="dx" ${f.executor==='vm'?'checked':''}> Isolated runner VM</label>
+        <label class="d-radio"><input type="radio" name="dx" ${f.executor==='unraid'?'checked':''}> Local Unraid host</label>
+        <label class="d-radio"><input type="radio" name="dx"> Remote runner agent</label>
+      </div></div>
+      ${f.executor==='vm'?`<div class="fld"><label>Agent</label><div class="val"><span class="d-dot d-healthy"></span> ${esc(f.agent)} · Healthy · 8 CPU · 16 GB available</div></div>`:''}
+      <div class="fld"><label>Security profile</label><div class="val" style="flex-direction:column;align-items:flex-start;gap:4px">
+        ${['Restricted build','Container build','Full Docker integration','GPU workload','Custom']
+          .map(x=>`<label class="d-radio"><input type="radio" name="dp" ${f.profile===x?'checked':''}> ${x}</label>`).join('')}
+      </div></div>
+      <div class="d-note">The profile enforces the combination — it is what makes “Ephemeral” read-only on a restricted fleet instead of a toggle someone can quietly turn off.</div>`,
+    'Capacity':`
+      <div class="fld"><label>Capacity mode</label><div class="val"><span class="d-pill">${auto?'Automatic':'Manual'}</span></div></div>
+      ${auto?`
+        <div class="fld"><label>Minimum runners</label><div class="val"><input type="number" value="${f.min??2}"></div></div>
+        <div class="fld"><label>Maximum runners</label><div class="val"><input type="number" value="${f.max??16}"></div></div>
+        <div class="fld"><label>Warm idle runners</label><div class="val"><input type="number" value="${f.warm??2}"></div></div>
+      `:`
+        <div class="fld"><label>Desired runners</label><div class="val"><input type="number" value="${f.count}"></div></div>
+      `}`,
+    'Resources':`
+      <div class="fld"><label>CPU per runner</label><div class="val"><input type="number" value="${f.cpus}"><span class="d-unit">cores</span></div></div>
+      <div class="fld"><label>Memory per runner</label><div class="val"><input type="number" value="${f.memGb}"><span class="d-unit">GB</span></div></div>
+      <div class="fld"><label>Job timeout</label><div class="val"><input type="number" value="${f.timeout}"><span class="d-unit">minutes</span></div></div>
+      <div class="fld"><label>Workspace</label><div class="val"><input type="number" value="${f.workspace}"><span class="d-unit">GB</span></div></div>`,
+    'Caching':`
+      <div class="fld"><label>Cache isolation</label><div class="val" style="flex-direction:column;align-items:flex-start;gap:4px">
+        <label class="d-radio"><input type="radio" name="dc" ${!f.sharedCache?'checked':''}> Per repository</label>
+        <label class="d-radio"><input type="radio" name="dc" ${f.sharedCache?'checked':''}> Shared across this fleet</label>
+        <label class="d-radio"><input type="radio" name="dc"> Disabled</label>
+      </div></div>
+      <div class="fld"><label>Cache limit</label><div class="val"><input type="number" value="${f.cacheLimit}"><span class="d-unit">GB</span></div></div>
+      <div class="fld"><label>Storage pool</label><div class="val"><select><option>cache</option><option>disk1</option></select></div></div>
+      <div class="fld"><label>Current usage</label><div class="val"><span>${f.cacheUsed} GB</span><button>Inspect cache</button><button>Clear package cache</button></div></div>`,
+    'Security':`
+      <div class="d-secgrid">
+        ${p.bad.concat(p.good).map(c=>`<div class="d-secrow">
+          <span class="d-seck">${esc(c.label)}</span>
+          <span class="d-secv ${p.bad.includes(c)?'bad':'ok'}">${esc(c.value)}</span>
+          <span class="d-secwhy">${p.bad.includes(c)?esc(c.why):'&nbsp;'}</span>
+        </div>`).join('')}
+      </div>
+      <div class="d-note">Values enforced by the <b>${esc(f.profile)}</b> profile are shown, not offered — a locked safe value beats a dangerous toggle. Combinations that cannot be made safe (public repositories on a privileged fleet) are rejected on save rather than warned about.</div>`,
+    'Advanced':`
+      <div class="fld"><label>Cache path</label><div class="val"><input value="/mnt/cache/github-runner/${esc(f.id)}"></div></div>
+      <div class="fld"><label>Runner labels</label><div class="val">${f.mode==='scaleset'
+        ? `<span class="d-locked">Defined by the scale set — the container cannot change them</span>`
+        : `<input value="${esc(f.labels)}">`}</div></div>
+      <div class="fld"><label>Runner image</label><div class="val"><input value="ghcr.io/stanvx/ci-runner:2026.7@sha256:9f2c…"></div></div>
+      <div class="d-note">Diagnostics: config is stored per fleet under <code>/boot/config/plugins/ci-runner-farm/fleets/${esc(f.id)}.cfg</code>; unset keys fall back to the fleet defaults.</div>`,
+  };
+  const secName = secs[sec] ? sec : 'General';
+
+  return `
+  <div class="surface">Fleet tab</div>
+  <div class="d-shell">
+    <nav class="d-rail">
+      <div class="d-rail-h">Fleets</div>
+      ${FLEETS.map(x=>{
+        const hx=health(x);
+        return `<div class="d-rail-row ${x.id===f.id?'on':''}" onclick="pick('${x.id}')">
+          <span class="d-dot d-${hx}" title="${HEALTH_LABEL[hx]}"></span>
+          <span class="d-rail-n">${esc(x.id)}</span>
+          <span class="d-mode">${x.mode==='scaleset'?'Scale set':'Legacy'}</span>
+        </div>`;
+      }).join('')}
+      <div class="d-rail-add"><button>+ Add fleet</button></div>
+    </nav>
+
+    <section class="d-main">
+      <div class="d-id">
+        <div class="grow">
+          <h1 class="d-title">${esc(f.id)}</h1>
+          <div class="d-sub">${esc(f.desc)}</div>
+          <div class="d-statusline">
+            <span class="d-dot d-${h}"></span><b>${HEALTH_LABEL[h]}</b>
+            <span class="d-sep">·</span><span>${f.up} runner${f.up===1?'':'s'}</span>
+            <span class="d-sep">·</span><span class="crf-muted">Updated ${ago(f.updated)}</span>
+          </div>
+        </div>
+        <div class="d-actions">
+          <button class="d-primary ${prim.kind}">${prim.label}</button>
+          <div class="d-menu">
+            <button onclick="set('menu', ${menuOpen?"''":"'1'"})">More ▾</button>
+            ${menuOpen?`<div class="d-menu-list">${SECONDARY.map(x=>`<span${/Force stop|Delete/.test(x)?' class="danger"':''}>${x}</span>`).join('')}</div>`:''}
+          </div>
+        </div>
+      </div>
+      <div class="d-attrs">${attrs(f).map(x=>`<span>${esc(x)}</span>`).join('')}</div>
+
+      ${a.length?`<div class="d-alert degraded">
+        <b>${esc(f.id)} is degraded</b>
+        <div>${a.map(esc).join(' · ')}</div>
+        <button>Review issue</button></div>`:''}
+
+      ${p.level==='strong'
+        ? `<div class="d-alert strong"><b>Security · Strong</b>
+             <div>${p.good.slice(0,5).map(c=>`<span class="d-pill ok">${esc(c.label)}: ${esc(c.value)}</span>`).join('')}</div></div>`
+        : (()=>{
+            const top = p.bad.slice(0,2), rest = p.bad.length-top.length;
+            const s = top.map(c=>c.clause).join(' and ');
+            return `<div class="d-alert attention"><b>Security needs attention</b>
+             <div>${esc(s.charAt(0).toUpperCase()+s.slice(1))}.${rest?` <span class="crf-muted">+${rest} more finding${rest>1?'s':''}</span>`:''}</div>
+             <div class="crf-muted">${top.map(c=>esc(c.why)).join(' ')}</div>
+             <button onclick="openSec('Security')">Review security settings</button></div>`;
+          })()}
+
+      <div class="d-cards">
+        ${card('Capacity', `${f.up} / ${auto?(f.max??f.count):f.count} online`,
+          `${f.busy} busy · ${f.idle} idle`,
+          `<div class="d-meter"><span style="width:${f.up?100*f.busy/f.up:0}%"></span></div>
+           <div class="d-card-x">Capacity mode: <b>${auto?'Automatic':'Manual'}</b><br>
+           ${auto?`${f.min??2} minimum · ${f.max??16} maximum · ${f.warm??2} warm`
+                 :`Desired runners: ${f.count}`}</div>`)}
+        ${(()=>{
+          const q = f.mode==='scaleset'?f.assigned:f.queued;
+          const urgent = q>0 && (f.queueOldest>=5 || q>f.up);
+          return `<div class="d-card ${urgent?'urgent':''}"><div class="d-card-t">Queue</div>
+            <div class="d-card-v">${q} job${q===1?'':'s'} ${f.mode==='scaleset'?'assigned':'waiting'}</div>
+            <div class="d-card-s">${q?`Oldest: ${f.queueOldest} minute${f.queueOldest===1?'':'s'}`:'Nothing waiting'}</div>
+            ${urgent?`<div class="d-card-x amber">${f.queueOldest>=5
+              ? 'Waiting longer than the 5 minute threshold.'
+              : 'More jobs assigned than runners online.'}</div>`:''}</div>`;
+        })()}
+        ${card('Storage', `${f.cacheUsed} GB cache`,
+          `${f.cacheLimit} GB limit · ${Math.round(100*f.cacheUsed/f.cacheLimit)}% used`,
+          `<div class="d-meter"><span style="width:${Math.round(100*f.cacheUsed/f.cacheLimit)}%"></span></div>`)}
+      </div>
+
+      <div class="d-tbl">
+        <div class="d-tr d-th"><span>Runner</span><span>State</span><span>Repository / job</span><span>Executor</span><span>Resources</span></div>
+        ${rs.map(r=>{
+          const st = r.phase==='pending' ? 'Provisioning'
+                   : r.phase==='busy'    ? 'Running'
+                   : r.phase==='idle'    ? 'Ready' : 'Cleaning up';
+          const stc = r.phase==='pending' ? 'degraded' : r.phase==='busy' ? 'active' : r.phase==='idle' ? 'healthy' : 'stopped';
+          const isOpen = openRunner===r.name && r.name!=='—';
+          return `<div class="d-tr ${isOpen?'on':''}" onclick="openRunnerPanel('${esc(isOpen?'':r.name)}')">
+            <span class="crf-name">${esc(r.name)}</span>
+            <span><span class="d-dot d-${stc}"></span> ${st}</span>
+            <span class="d-job">${r.repo
+              ? `<b>${esc(r.repo)}</b><br><span class="crf-muted">${esc(r.wf)} · ${esc(r.branch)}${r.el?` · running for ${r.el}`:''}</span>`
+              : '<span class="crf-muted">Waiting for a job</span>'}</span>
+            <span class="crf-muted">${f.executor==='vm'?esc(f.agent):'Unraid'}</span>
+            <span class="d-res">${r.phase==='pending'?'<span class="crf-muted">—</span>':
+              `<b>${r.cpu}%</b> · <b>${r.memUsed} GB</b><div class="d-meter thin"><span style="width:${r.cpu}%"></span></div>`}</span>
+          </div>
+          ${isOpen?`<div class="d-panel">
+            <div><span>Repository</span>${esc(r.repo||'—')}</div>
+            <div><span>Workflow</span>${esc(r.wf||'—')} ${r.branch?'· '+esc(r.branch):''}</div>
+            <div><span>Runner ID</span>${esc(r.id)}</div>
+            <div><span>Executor host</span>${f.executor==='vm'?esc(f.agent):'Unraid host'}</div>
+            <div><span>Started</span>${r.el?r.el+' ago':'—'}</div>
+            <div><span>Resources</span>${r.cpu}% CPU · ${r.memUsed} GB of ${f.memGb} GB</div>
+            <div><span>Image digest</span><code>${esc(r.digest)}</code></div>
+            <div><span>Security profile</span>${esc(f.profile)}</div>
+            <div class="d-panel-log">[runner] downloading actions/checkout@v4
+[runner] ##[group]Run pnpm install
+[runner] Lockfile is up to date, resolution step is skipped</div>
+            <div class="d-panel-act"><button>Stop runner</button><button>Full log</button></div>
+          </div>`:''}`;
+        }).join('')}
+      </div>
+    </section>
+  </div>
+
+  <div class="surface" style="margin-top:26px">Settings tab</div>
+  <div class="d-settings">
+    <h2 style="margin-top:6px">${esc(f.id)} settings</h2>
+    <div class="d-acc">
+      ${Object.keys(secs).map(k=>`
+        <div class="d-acc-h ${k===secName?'on':''}" onclick="openSec('${k}')">${k}<span>${k===secName?'▾':'▸'}</span></div>
+        ${k===secName?`<div class="d-acc-b">${secs[k]}</div>`:''}`).join('')}
+    </div>
+    <div class="d-save"><button>Discard</button><button class="d-primary normal">Save changes</button></div>
+  </div>
+
+  <div class="surface" style="margin-top:26px">Add fleet — final wizard step</div>
+  <div class="d-settings">
+    <div class="d-wiz">
+      <div class="d-wiz-steps">${['Purpose','Execution','GitHub access','Capacity','Review'].map((s,i)=>
+        `<span class="${i===4?'on':'done'}">${i+1}. ${s}</span>`).join('')}</div>
+      <p class="d-wiz-sum">This fleet will run <b>ephemeral</b> Android builds on <b>ci-runner-vm-01</b>.
+      It can be used by <b>3 selected repositories</b>. It cannot reach your Unraid host,
+      the LAN, or the host Docker daemon. Maximum concurrency: <b>2</b>.</p>
+      <div class="d-save"><button>Back</button><button class="d-primary go">Create fleet</button></div>
+    </div>
+  </div>
+
+  <div class="surface" style="margin-top:26px">Main dashboard widget</div>
+  <div class="widget" style="width:340px">
+    <div class="crfw-head"><span>CI Runner Farm</span></div>
+    <div class="d-wsum">${FLEETS.length} fleets · ${TOT.up} runners · ${TOT.waiting} jobs queued</div>
+    <div class="d-wcounts">
+      ${['healthy','active','degraded','stopped'].map(k=>{
+        const n=FLEETS.filter(x=>health(x)===k).length;
+        return n?`<span><span class="d-dot d-${k}"></span>${n} ${k}</span>`:'';
+      }).join('')}
+    </div>
+    ${FLEETS.map(x=>{
+      const hx=health(x), q=x.mode==='scaleset'?x.assigned:x.queued;
+      return `<div class="d-wrow"><span class="d-dot d-${hx}"></span>
+        <span class="crf-name grow">${esc(x.id)}</span>
+        <span class="crf-muted">${hx==='stopped'?'Stopped':`${x.busy}/${x.up} busy${q?` · ${q} ${x.mode==='scaleset'?'assigned':'queued'}`:''}`}</span></div>`;
+    }).join('')}
+    <div class="crfw-foot" style="margin-top:6px"><span>&nbsp;</span><a href="#">Open ›</a></div>
+  </div>`;
+}
+
 /* ------------------------------------------------------------------- switcher */
-const VARIANTS = {A:['Selector',VariantA], B:['Master rail',VariantB], C:['Stacked cards',VariantC]};
+const VARIANTS = {A:['Selector',VariantA], B:['Master rail',VariantB], C:['Stacked cards',VariantC], D:['Product',VariantD]};
 const qs = new URLSearchParams(location.search);
-const v  = (qs.get('variant')||'A').toUpperCase();
-const cur = VARIANTS[v] ? v : 'A';
+const v  = (qs.get('variant')||'D').toUpperCase();
+const cur = VARIANTS[v] ? v : 'D';
 const sel = qs.get('fleet') || (cur==='C' ? 'org-scaleset' : 'default');
 
 /* file:// has a null origin, so history.pushState throws — just set location. */
-function go(variant, fleet){
-  const p = new URLSearchParams({variant, fleet, theme: qs.get('theme')||'dark'});
+function set(k,val){
+  const p = new URLSearchParams(location.search);
+  val ? p.set(k,val) : p.delete(k);
   location.search = '?'+p.toString();
 }
-function pick(id){ go(cur, id); }
+function pick(id){ set('fleet', id); }
+function openSec(name){ set('sec', name); }
+function openRunnerPanel(name){ set('runner', name); }
 function cycle(d){
   const ks = Object.keys(VARIANTS);
-  go(ks[(ks.indexOf(cur)+d+ks.length)%ks.length], sel);
+  set('variant', ks[(ks.indexOf(cur)+d+ks.length)%ks.length]);
 }
 if((qs.get('theme')||'dark')==='light') document.body.classList.add('light');
 
-document.getElementById('app').innerHTML = VARIANTS[cur][1](sel);
+document.getElementById('app').innerHTML = VARIANTS[cur][1](sel, qs.get('sec'), qs.get('runner'), qs.get('menu')==='1');
 document.body.insertAdjacentHTML('beforeend', `
   <div id="sw">
     <button onclick="cycle(-1)" aria-label="previous variant">←</button>
