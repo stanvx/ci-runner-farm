@@ -848,8 +848,14 @@ _ensure_mirror() {
   # non-isolated fleet reaches it on the published docker0-gateway port, which only
   # exists if the mirror was CREATED with -p. So recreate only in the one direction
   # that a connect can't fix: this fleet needs the published port and there isn't one.
+  local prevnets=""
   if docker ps -a --format '{{.Names}}' | grep -qx "$MIRROR_NAME" && [ "$NETWORK_ISOLATION" = "off" ] \
      && [ "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$MIRROR_NAME" 2>/dev/null)" = "0" ]; then
+    # This recreate is driven by ONE fleet switching to `off`, but the mirror is shared:
+    # the other fleets' runners reach it by name on their own bridges, and a bare
+    # rm -f would silently drop those attachments until each fleet next provisioned.
+    # Remember them and reattach below.
+    prevnets="$(docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}' "$MIRROR_NAME" 2>/dev/null)"
     log "network mode changed -> recreating shared image cache ($MIRROR_NAME) with a published port"
     docker rm -f "$MIRROR_NAME" >/dev/null 2>&1
   fi
@@ -890,6 +896,13 @@ _ensure_mirror() {
       return 1
     fi
   fi
+  # Reattach the other fleets' bridges we just detached by recreating (above). `bridge`
+  # is Docker's default and is joined implicitly, so skip it.
+  local pn
+  for pn in $prevnets; do
+    [ "$pn" = bridge ] && continue
+    docker network connect "$pn" "$MIRROR_NAME" >/dev/null 2>&1 || true
+  done
   # Join this fleet's bridge if it isn't already on it — the multi-fleet path: the
   # mirror was created on whichever fleet started first, and every later isolated
   # fleet attaches here instead of recreating it. Already-connected is not an error.
@@ -1098,9 +1111,17 @@ start_one() {
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
     log "runner $name already exists; skipping"; return 0
   fi
-  with_host_lock host_cap_ok || return 1        # box-wide ceiling, checked per container
+  # Mint the registration token OUTSIDE the host lock: it is a GitHub round trip, and
+  # holding a box-wide lock across it would serialize every fleet's startup on network
+  # latency.
   build_args "$idx" || { err "runner $name not started (registration-token error)"; return 1; }
   log "starting $name (cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=$GH_SCOPE)"
+  # Cap check and `docker run` under ONE hold of the host lock. Checking and then
+  # releasing would let two fleets both pass at HOST_MAX-1 and land the box one over.
+  with_host_lock _run_one
+}
+_run_one() {
+  host_cap_ok || return 1                       # box-wide ceiling, checked per container
   docker run "${ARGS[@]}" >/dev/null
 }
 
@@ -2219,9 +2240,12 @@ case "${1:-status}" in
   dashboard-counts) dashboard_counts ;;
   fleets-json)  cmd_fleets_json ;;
   fleet-entry-json) cmd_fleet_entry_json ;;
-  fleet-create) cmd_fleet_create "${2:?usage: fleet-create <name>}" ;;
-  fleet-rename) cmd_fleet_rename "${2:?usage: fleet-rename <old> <new>}" "${3:?usage: fleet-rename <old> <new>}" ;;
-  fleet-delete) cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
+  # Lifecycle mutates shared flash state (the fleets/ dir) and guards on a container
+  # count, so it takes the host lock: two concurrent renames of one fleet could
+  # otherwise both pass the "no containers" check.
+  fleet-create) with_host_lock cmd_fleet_create "${2:?usage: fleet-create <name>}" ;;
+  fleet-rename) with_host_lock cmd_fleet_rename "${2:?usage: fleet-rename <old> <new>}" "${3:?usage: fleet-rename <old> <new>}" ;;
+  fleet-delete) with_host_lock cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
   queued-refresh) cmd_queued_refresh ;;
