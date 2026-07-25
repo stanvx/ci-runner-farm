@@ -1220,6 +1220,13 @@ with_host_lock() {
 
 # Every managed runner on the box, whatever fleet — the host cap's denominator.
 host_managed_count() { docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | grep -c . ; }
+# Containers owned by an ARBITRARY fleet (not necessarily the resolved one), so the
+# fleet verbs can count a fleet they are not running as. Label-filtered, so it does not
+# see pre-upgrade unlabelled runners — those are fleet `default`, which cannot be
+# renamed or deleted anyway.
+fleet_container_count() {
+  docker ps -a --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${1}" --format '{{.Names}}' | grep -c .
+}
 # Per-fleet tally for the cap's error message, so "why was my legal target refused?"
 # is answerable from the message alone.
 host_fleet_usage() {
@@ -1342,6 +1349,16 @@ cmd_reconcile_config() {
 }
 
 cmd_start() {
+  # A rename is still handing this fleet's runners to another one. Refilling it here
+  # would fight the handover runner-for-runner and it would never finish. Resume the
+  # handover instead — this is also how a drain interrupted by a reboot restarts, since
+  # boot-autostart comes through cmd_start.
+  local dt; dt="$(drain_target)"
+  [ -n "$dt" ] && {
+    log "fleet $FLEET is being renamed to $dt — resuming the handover instead of starting runners"
+    nohup "$0" --fleet "$FLEET" fleet-drain-rename >>"$FARM_LOG" 2>&1 &
+    return 0
+  }
   [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp; secp="$(public_repo_problem)"
@@ -2011,9 +2028,10 @@ cmd_fleets_json() {
 }
 # One fleet's entry, emitted in the resolved context of that fleet.
 cmd_fleet_entry_json() {
-  printf '{"name":"%s","mode":"%s","configured":%s,"running":%s}' \
+  printf '{"name":"%s","mode":"%s","configured":%s,"running":%s,"draining_to":"%s"}' \
     "$(printf '%s' "$FLEET" | json_escape)" "$(printf '%s' "$FLEET_MODE" | json_escape)" \
-    "${RUNNER_COUNT:-0}" "$(managed_running_names | grep -c .)"
+    "${RUNNER_COUNT:-0}" "$(managed_running_names | grep -c .)" \
+    "$(printf '%s' "$(drain_target)" | json_escape)"
 }
 
 # Create an empty fleet: just its cfg file. Empty means "every default", exactly like a
@@ -2029,14 +2047,28 @@ cmd_fleet_create() {
   echo "{\"ok\":true,\"action\":\"fleet-create\",\"fleet\":\"$(printf '%s' "$name" | json_escape)\"}"
 }
 
+# The fleet a rename is still handing runners over to, '' when not renaming. Kept as a
+# sibling file rather than a cfg key on purpose: the Settings form POSTs to Unraid's
+# /update.php, which rewrites the cfg from the posted fields, so a marker key there could
+# be silently dropped by an unrelated Apply landing mid-handover. A file also means no
+# new config key, and nothing for an operator to set by hand.
+drain_target() {
+  local f="${1:-$FLEET}"
+  [ "$f" = default ] && return 0                # default is never a rename source
+  cat "${FLEETDIR}/${f}.draining" 2>/dev/null
+}
+
 # Rename moves the fleet's OWN keys to the new cfg path and leaves the global layer
 # where it is (it belongs to the box, not the fleet).
 #
-# Refused while the fleet still owns containers, like delete. A fleet's identity IS its
-# label and its name prefix, and neither can be changed on a live container — so a
-# "rename and drain" would leave every runner labelled with a fleet that no longer has
-# a config, invisible to both the old name and the new one, until the drain finished.
-# Stopping first costs the operator one click and removes that window entirely.
+# An EMPTY fleet renames instantly: two flash writes and it's done. A fleet with live
+# containers is HANDED OVER instead, because a fleet's identity IS its label plus its
+# name prefix and neither can be changed on a running container. The naive version —
+# move the cfg, then drain — would leave every runner labelled with a fleet that has no
+# config, invisible to autoscale, stop and status alike, for the length of the drain.
+# So the old cfg is COPIED, not moved, and stays on flash until the last old runner is
+# gone: both fleets are real and fully resolvable the whole way through, and capacity
+# moves across one runner at a time (see cmd_fleet_drain_rename).
 cmd_fleet_rename() {
   local old="$1" new="$2" n
   [ "$old" = default ] && { echo '{"ok":false,"error":"fleet default cannot be renamed (it is the legacy config path)"}'; return 1; }
@@ -2044,12 +2076,80 @@ cmd_fleet_rename() {
   [ "$new" = default ] && { echo '{"ok":false,"error":"fleet default always exists"}'; return 1; }
   [ -f "$(cfg_path "$old")" ] || { echo '{"ok":false,"error":"no such fleet"}'; return 1; }
   [ -f "$(cfg_path "$new")" ] && { echo '{"ok":false,"error":"a fleet with that name already exists"}'; return 1; }
-  n="$(docker ps -a --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${old}" --format '{{.Names}}' | grep -c .)"
-  [ "${n:-0}" -gt 0 ] && { echo "{\"ok\":false,\"error\":\"fleet still has $n container(s) — stop it first, then rename\"}"; return 1; }
-  mv "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not move the fleet config"}'; return 1; }
-  [ -f "${FLEETDIR}/${old}.Dockerfile" ] && mv "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
-  log "fleet renamed: $old -> $new"
-  echo "{\"ok\":true,\"action\":\"fleet-rename\",\"fleet\":\"$(printf '%s' "$new" | json_escape)\"}"
+  # A second rename of a fleet already mid-handover would have two drains competing for
+  # the same containers with different targets. One at a time.
+  [ -n "$(drain_target "$old")" ] && { echo "{\"ok\":false,\"error\":\"fleet is already being renamed to $(drain_target "$old") — wait for that handover to finish\"}"; return 1; }
+  n="$(fleet_container_count "$old")"
+  if [ "${n:-0}" -eq 0 ]; then
+    mv "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not move the fleet config"}'; return 1; }
+    [ -f "${FLEETDIR}/${old}.Dockerfile" ] && mv "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
+    log "fleet renamed: $old -> $new"
+    echo "{\"ok\":true,\"action\":\"fleet-rename\",\"fleet\":\"$(printf '%s' "$new" | json_escape)\"}"
+    return 0
+  fi
+  # Order matters: the new cfg must be complete before anything marks the old fleet as
+  # draining, or a crash between the two leaves a fleet handing over to a fleet that
+  # does not exist.
+  cp "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not copy the fleet config"}'; return 1; }
+  [ -f "${FLEETDIR}/${old}.Dockerfile" ] && cp "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
+  printf '%s\n' "$new" > "${FLEETDIR}/${old}.draining" || { rm -f "$(cfg_path "$new")" "${FLEETDIR}/${new}.Dockerfile"; echo '{"ok":false,"error":"could not mark the fleet as draining"}'; return 1; }
+  log "fleet rename: $old -> $new, handing over $n runner(s) as they go idle"
+  nohup "$0" --fleet "$old" fleet-drain-rename >>"$FARM_LOG" 2>&1 &
+  echo "{\"ok\":true,\"action\":\"fleet-rename\",\"fleet\":\"$(printf '%s' "$new" | json_escape)\",\"draining\":true,\"runners\":$n}"
+}
+
+# The handover worker, detached, running as the OLD fleet. Retires one idle runner at a
+# time and refills the new fleet behind it, so the box never carries both fleets at full
+# size (cmd_scale's HARD_MAX is per-fleet and would not see the pair). Busy runners keep
+# their in-flight job and are caught on a later pass, exactly like reconcile_stale_runners.
+# The old cfg is removed LAST — until then the fleet is still startable, stoppable and
+# visible, which is the entire reason this is a copy-and-drain rather than a move.
+cmd_fleet_drain_rename() {
+  # Drop every lock fd inherited from the cmd_fleet_rename that nohup'd us (fd 6 host,
+  # fd 8 fleet): we outlive that process by hours, and holding its host lock would wedge
+  # every other fleet. See cmd_reconcile_drain, which does the same for fd 8.
+  exec 6>&- 8>&- 9>&- 2>/dev/null || true
+  local target deadline cap c want retired
+  target="$(drain_target)"
+  [ -n "$target" ] || { err "fleet $FLEET is not being renamed"; return 1; }
+  [ -f "$(cfg_path "$target")" ] || { err "rename target $target has no config — leaving fleet $FLEET as it is"; return 1; }
+  autoscale_stop; imageupdate_stop            # nothing may regrow the fleet mid-handover
+  # Match cmd_start's sizing rule so the new fleet lands on the size it would have been
+  # started at, not RUNNER_COUNT while autoscaling wants the floor.
+  cap="$RUNNER_COUNT"; [ "$AUTOSCALE" = "true" ] && cap="$AUTOSCALE_MIN"
+  deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  while [ "$(managed_names | grep -c .)" -gt 0 ]; do
+    retired=0
+    for c in $(managed_names | sort -rV); do
+      [ -n "$c" ] || continue
+      # Idle AND error: a wedged runner never reaches idle on its own, so leaving it
+      # would stall the handover until the timeout for no benefit.
+      case "$(runner_state "$c")" in idle|error) ;; *) continue ;; esac
+      log "fleet $FLEET -> $target: retiring $c"
+      with_fleet_lock wait remove_runner "$c"
+      retired=1
+      break                                   # one per pass, then refill before the next
+    done
+    if [ "$retired" = 1 ]; then
+      want=$(( $(fleet_container_count "$target") + 1 ))
+      [ "$want" -le "$cap" ] && "$0" --fleet "$target" scale "$want" >>"$FARM_LOG" 2>&1
+    fi
+    [ "$(managed_names | grep -c .)" -eq 0 ] && break
+    # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), matching
+    # cmd_reconcile_drain. On timeout BOTH fleets are left intact and valid — the
+    # handover resumes on the next Start or boot (see cmd_start).
+    [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && {
+      log "fleet $FLEET -> $target: $(managed_names | grep -c .) runner(s) still busy after the drain timeout — fleet $FLEET stays up; Start it again or reboot to resume the handover"
+      return 0
+    }
+    sleep 15
+  done
+  # Empty at last: reuse the normal teardown for the daemons, the strict-mode egress
+  # rules and this fleet's isolated network (it leaves the shared mirror alone while the
+  # new fleet is using it), then retire the config that kept the fleet resolvable.
+  with_fleet_lock wait cmd_stop >>"$FARM_LOG" 2>&1
+  rm -f "$(cfg_path "$FLEET")" "${FLEETDIR}/${FLEET}.Dockerfile" "${FLEETDIR}/${FLEET}.draining"
+  log "fleet renamed: $FLEET -> $target (handover complete)"
 }
 
 # Refuse while the fleet still owns containers — deleting its config would orphan them
@@ -2058,9 +2158,9 @@ cmd_fleet_delete() {
   local name="$1" n
   [ "$name" = default ] && { echo '{"ok":false,"error":"fleet default cannot be deleted (it is the legacy config path)"}'; return 1; }
   [ -f "$(cfg_path "$name")" ] || { echo '{"ok":false,"error":"no such fleet"}'; return 1; }
-  n="$(docker ps -a --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${name}" --format '{{.Names}}' | grep -c .)"
+  n="$(fleet_container_count "$name")"
   [ "${n:-0}" -gt 0 ] && { echo "{\"ok\":false,\"error\":\"fleet still has $n container(s) — stop it first\"}"; return 1; }
-  rm -f "$(cfg_path "$name")" "${FLEETDIR}/${name}.Dockerfile"
+  rm -f "$(cfg_path "$name")" "${FLEETDIR}/${name}.Dockerfile" "${FLEETDIR}/${name}.draining"
   log "fleet deleted: $name"
   echo "{\"ok\":true,\"action\":\"fleet-delete\",\"fleet\":\"$(printf '%s' "$name" | json_escape)\"}"
 }
@@ -2245,6 +2345,8 @@ case "${1:-status}" in
   # otherwise both pass the "no containers" check.
   fleet-create) with_host_lock cmd_fleet_create "${2:?usage: fleet-create <name>}" ;;
   fleet-rename) with_host_lock cmd_fleet_rename "${2:?usage: fleet-rename <old> <new>}" "${3:?usage: fleet-rename <old> <new>}" ;;
+  # No host lock: this runs for hours and takes the locks it needs per step.
+  fleet-drain-rename) cmd_fleet_drain_rename ;;
   fleet-delete) with_host_lock cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
