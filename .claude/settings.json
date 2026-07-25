@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Syntax-checking edited file",
+            "timeout": 20,
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; case \"$f\" in *.sh) bash -n \"$f\";; *.php|*.page) if command -v php >/dev/null && grep -q '<?php' \"$f\"; then php -l \"$f\"; fi;; esac; }"
+          }
+        ]
+      }
+    ]
+  }
+}
