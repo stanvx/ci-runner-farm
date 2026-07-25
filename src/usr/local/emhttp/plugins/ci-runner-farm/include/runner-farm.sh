@@ -26,10 +26,48 @@ CFGDIR="/boot/config/plugins/${PLUGIN}"
 RUNDIR="/var/local/emhttp/${PLUGIN}"
 mkdir -p "$RUNDIR" 2>/dev/null || RUNDIR="$CFGDIR"
 CFG="${CFGDIR}/${PLUGIN}.cfg"
+FLEETDIR="${CFGDIR}/fleets"
 TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
-NAME_PREFIX="ci-runner"
+FLEET_LABEL="net.unraid.ci-runner-farm.fleet"
+
+# --- fleet resolution -------------------------------------------------------
+# One install hosts N named fleets. A fleet is `fleets/<name>.cfg` plus a
+# `net.unraid.ci-runner-farm.fleet=<name>` label on its containers. Resolve it BEFORE
+# anything reads config or derives a name, then every cmd_* below runs unchanged
+# against the one resolved current fleet.
+#
+# Fleet `default` IS the legacy install: it keeps the legacy cfg path, container
+# names, network name, image tag and runtime filenames byte for byte, so upgrading
+# writes nothing to flash and churns no container.
+FLEET="${CRF_FLEET:-default}"
+FLEET_EXPLICIT=0; [ -n "${CRF_FLEET:-}" ] && FLEET_EXPLICIT=1
+if [ "${1:-}" = "--fleet" ]; then
+  FLEET="${2:-}"; FLEET_EXPLICIT=1; shift 2
+fi
+if ! printf '%s' "$FLEET" | grep -qE '^[a-z][a-z0-9-]{0,30}$'; then
+  echo "[ci-runner-farm] ERROR: invalid fleet name '$FLEET' (expected ^[a-z][a-z0-9-]{0,30}\$)" >&2
+  exit 1
+fi
+# Suffix applied to every per-fleet name. Empty for `default` — that is what keeps an
+# upgraded install identical.
+FSFX=""; [ "$FLEET" != default ] && FSFX="-${FLEET}"
+
+# The cfg file holding a fleet's own keys. The legacy path doubles as fleet
+# `default`'s layer AND as the host-wide global layer for every fleet.
+cfg_path() {
+  local f="${1:-$FLEET}"
+  if [ "$f" = default ]; then printf '%s' "$CFG"; else printf '%s/%s.cfg' "$FLEETDIR" "$f"; fi
+}
+
+# Runner-name prefix. Derived, never configured: `ci-runner-N` for `default`,
+# `ci-runner-<fleet>-N` otherwise. The fleet-name regex forbids a leading digit, so
+# `ci-runner-<fleet>-` can never be mistaken for `ci-runner-<index>`.
+NAME_PREFIX="ci-runner${FSFX}"
+# Per-fleet editable Dockerfile (the built image tag is derived the same way below).
+DOCKERFILE="$CFGDIR/Dockerfile"
+[ "$FLEET" != default ] && DOCKERFILE="${FLEETDIR}/${FLEET}.Dockerfile"
 
 # ---- defaults (overridden by ci-runner-farm.cfg) ---------------------------
 GH_SCOPE="repo"                       # repo | org
@@ -96,23 +134,33 @@ IMAGE_DRAIN_TIMEOUT="3600"           # max seconds to wait for a busy runner to 
                                      # before leaving it on the old image this cycle (0 = wait forever)
 # shellcheck disable=SC2034  # consumed only by RunnerFarmDashboard.page's Cond, never inside this script
 DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (read only by RunnerFarmDashboard.page's Cond)
+# ---- fleet ------------------------------------------------------------------
+FLEET_MODE="legacy"                  # legacy = registration-token runners (the only mode today).
+                                     # Reserved for scale-set fleets; nothing reads it yet.
 # ----------------------------------------------------------------------------
 
-# Allowlist of keys the settings page may set. load_cfg only ever assigns these.
-CFG_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS \
-RUNNER_CPUS RUNNER_MEMORY CACHE_ROOT WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
-RUN_AS_ROOT REGISTRY_SERVER REGISTRY_USERNAME CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
-SHARED_IMAGE_CACHE NETWORK_ISOLATION RUNNER_NETWORK MIRROR_PORT AUTOSCALE AUTOSCALE_MIN \
+# Allowlist of keys the settings page may set, split into the two layers a fleet is
+# assembled from. GLOBAL_KEYS describe the box (one mirror, one cache root, one host
+# `docker login`) and are read from the legacy cfg path whatever fleet is current;
+# FLEET_KEYS describe one fleet and are read from that fleet's own cfg on top. A key
+# belongs to exactly one list (config-parity.sh asserts it).
+GLOBAL_KEYS="CACHE_ROOT SHARED_IMAGE_CACHE MIRROR_PORT REGISTRY_SERVER \
+REGISTRY_USERNAME DASHBOARD_WIDGET_ENABLE"
+FLEET_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS \
+RUNNER_CPUS RUNNER_MEMORY WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
+RUN_AS_ROOT CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
+NETWORK_ISOLATION RUNNER_NETWORK AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
 AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT \
-DASHBOARD_WIDGET_ENABLE"
+FLEET_MODE"
 
-# Read ci-runner-farm.cfg WITHOUT sourcing it (the file is written by the web form, so
+# Read one cfg file WITHOUT sourcing it (the file is written by the web form, so
 # sourcing would execute anything a crafted value smuggled in). Parse KEY="value"
 # lines ourselves and assign via printf -v — a literal string set, never eval'd —
-# and only for keys on the allowlist above.
-load_cfg() {
-  [ -f "$CFG" ] || return 0
+# and only for keys on the allowlist passed in. $1=file $2=allowlist
+load_cfg_file() {
+  local file="$1" allow="$2"
+  [ -f "$file" ] || return 0
   local line key val
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
@@ -120,29 +168,79 @@ load_cfg() {
     key="${line%%=*}"; val="${line#*=}"
     key="${key//[[:space:]]/}"
     case "$key" in *[!A-Za-z0-9_]*|'') continue;; esac
-    case " $CFG_KEYS " in *" $key "*) ;; *) continue;; esac
+    case " $allow " in *" $key "*) ;; *) continue;; esac
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
     printf -v "$key" '%s' "$val"
-  done < "$CFG"
+  done < "$file"
+}
+
+# Global layer first, then the current fleet's layer on top. For fleet `default` both
+# reads hit the same legacy file — which is exactly why an upgrade is a no-op.
+load_cfg() {
+  load_cfg_file "$CFG" "$GLOBAL_KEYS"
+  load_cfg_file "$(cfg_path)" "$FLEET_KEYS"
 }
 
 load_cfg
+# Names derived per fleet, applied after load_cfg so an operator-pinned value wins.
+# `default` keeps every legacy name; any other fleet gets its own network, iptables
+# tag and built image so two fleets can never unprotect or overwrite each other.
+if [ "$FLEET" != default ]; then
+  [ "$RUNNER_NETWORK" = "ci-runner-net" ] && RUNNER_NETWORK="ci-runner-net-${FLEET}"
+  BUILTIN_IMAGE="ci-runner-farm-runner${FSFX}:latest"
+fi
+# Always per-fleet, including `default`: firewall_clear deletes every rule carrying
+# the tag, so a shared tag means a second strict fleet silently unprotects the first.
+# The bare pre-upgrade tag is swept once by firewall_clear (LEGACY_FW_TAG).
+LEGACY_FW_TAG=""; [ "$FLEET" = default ] && LEGACY_FW_TAG="$FW_TAG"
+FW_TAG="${FW_TAG}:${FLEET}"
 [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
 [ -z "$REGISTRY_TOKEN" ] && [ -f "$REGISTRY_TOKEN_FILE" ] && REGISTRY_TOKEN="$(cat "$REGISTRY_TOKEN_FILE" 2>/dev/null)"
 # PID files live on tmpfs (RUNDIR), not flash: they're pure per-boot runtime state,
 # so this both spares the USB stick and means a stale PID can't survive a reboot to
 # later match an unrelated reused PID that autoscale_stop would then kill.
-AUTOSCALE_PID="${RUNDIR}/autoscale.pid"
-IMAGEUPDATE_PID="${RUNDIR}/imageupdate.pid"
-SECURITY_CACHE="${RUNDIR}/security-warn.cache"   # cached public-repo warning (TTL below), so the
+#
+# Every one of these is per-fleet ($FSFX): two fleets sharing a pid file would kill
+# each other's daemon, and sharing a cache file would report one fleet's runners as
+# the other's. `default` keeps the unsuffixed legacy names so an in-place upgrade
+# finds the state it left behind.
+AUTOSCALE_PID="${RUNDIR}/autoscale${FSFX}.pid"
+IMAGEUPDATE_PID="${RUNDIR}/imageupdate${FSFX}.pid"
+AUTOSCALE_STATE="${RUNDIR}/autoscale${FSFX}.state"
+FARM_LOG="${RUNDIR}/autoscale${FSFX}.log"        # autoscale + reconcile log; farm-log tails it
+IMAGEUPDATE_LOG="${RUNDIR}/imageupdate${FSFX}.log"
+FLEET_LOCK="${RUNDIR}/fleet${FSFX}.lock"
+HOST_LOCK="${RUNDIR}/host.lock"                  # deliberately NOT per-fleet — see with_host_lock
+RECONCILE_LOCK="${RUNDIR}/reconcile${FSFX}.lock"
+RECONCILE_SHRINK="${RUNDIR}/reconcile${FSFX}.shrink"
+QUEUED_CACHE="${RUNDIR}/queued${FSFX}.cache";     QUEUED_LOCK="${RUNDIR}/queued${FSFX}.lock"
+STATS_CACHE="${RUNDIR}/stats${FSFX}.cache";       STATS_LOCK="${RUNDIR}/stats${FSFX}.lock"
+CACHEUSE_CACHE="${RUNDIR}/cache-usage${FSFX}.cache"; CACHEUSE_LOCK="${RUNDIR}/cache-usage${FSFX}.lock"
+USAGE_CACHE="${RUNDIR}/usage${FSFX}.cache";       USAGE_LOCK="${RUNDIR}/usage${FSFX}.lock"
+WARN_CACHE="${RUNDIR}/warn${FSFX}.cache";         SEC_CACHE="${RUNDIR}/sec${FSFX}.cache"
+BUILD_LOG="${RUNDIR}/build${FSFX}.log";           BUILD_LOCK="${RUNDIR}/build${FSFX}.lock"
+SECURITY_CACHE="${RUNDIR}/security-warn${FSFX}.cache"   # cached public-repo warning (TTL below), so the
 SECURITY_TTL="300"                               # UI's 5s status poll never hammers the GitHub API
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
 host() { hostname -s; }
 
-managed_names() {
-  docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V
+# Managed containers belonging to the CURRENT fleet. A managed container with no
+# fleet label at all is a pre-upgrade runner (or an orphan from before this feature)
+# and counts as fleet `default` — a bare `--filter label=…fleet=default` would exclude
+# it, which is why default takes the label-reading path instead of a second filter.
+managed_names() { _managed_names -a; }
+# Same, RUNNING only (the confgen/reconcile paths care about live runners).
+managed_running_names() { _managed_names; }
+_managed_names() {
+  if [ "$FLEET" = default ]; then
+    docker ps "$@" --filter "label=${MANAGED_LABEL}" --format "{{.Names}}|{{.Label \"${FLEET_LABEL}\"}}" \
+      | awk -F'|' '$2=="" || $2=="default" {print $1}' | sort -V
+  else
+    docker ps "$@" --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${FLEET}" \
+      --format '{{.Names}}' | sort -V
+  fi
 }
 
 current_count() { managed_names | grep -c . ; }
@@ -194,7 +292,7 @@ runner_confgen() { docker inspect -f '{{ index .Config.Labels "net.unraid.ci-run
 # UI "migrating" indicator).
 count_stale_runners() {
   local cur c n=0; cur="$(crf_confgen)"
-  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}'); do
+  for c in $(managed_running_names); do
     [ -n "$c" ] || continue
     [ "$(runner_confgen "$c")" = "$cur" ] || n=$((n+1))
   done
@@ -264,7 +362,7 @@ autoscale_tick() {
   reap_dead_runners        # drop dead containers first so idle accounting is real
   local cur busy idle statef over target
   cur=$(current_count); busy=$(busy_count); idle=$((cur - busy))
-  statef="${RUNDIR}/autoscale.state"; over=0
+  statef="$AUTOSCALE_STATE"; over=0
   [ -f "$statef" ] && over=$(cat "$statef" 2>/dev/null || echo 0)
 
   # runner churn (crash, reap, or ephemeral exit) can drop the fleet below the
@@ -309,7 +407,7 @@ autoscale_daemon() {
   # runs) and (b) every UI start/stop/scale/recycle would block 20s then fail "fleet
   # busy". Closing fd 8 here releases the inherited lock; with_fleet_lock reopens it
   # fresh per tick. (7/9 closed too, defensively, for any future locked spawn path.)
-  exec 8>&- 7>&- 9>&- 2>/dev/null || true
+  exec 8>&- 7>&- 9>&- 6>&- 2>/dev/null || true
   log "autoscale daemon up (min=$AUTOSCALE_MIN max=$AUTOSCALE_MAX buffer=$AUTOSCALE_MIN_IDLE step=$AUTOSCALE_STEP every ${AUTOSCALE_INTERVAL}s)"
   while true; do
     load_cfg
@@ -323,14 +421,17 @@ autoscale_daemon() {
 autoscale_start() {
   [ "$AUTOSCALE" = "true" ] || return 0
   autoscale_stop
-  nohup "$0" autoscale-daemon >>"${RUNDIR}/autoscale.log" 2>&1 &
+  nohup "$0" --fleet "$FLEET" autoscale-daemon >>"$FARM_LOG" 2>&1 &
   echo $! > "$AUTOSCALE_PID"
   log "autoscale daemon started (pid $(cat "$AUTOSCALE_PID"))"
 }
 autoscale_stop() {
   [ -f "$AUTOSCALE_PID" ] && kill "$(cat "$AUTOSCALE_PID")" 2>/dev/null
   rm -f "$AUTOSCALE_PID"
-  pkill -f "runner-farm.sh autoscale-daemon" 2>/dev/null || true
+  # Fleet-scoped pattern: the daemons are always launched with an explicit --fleet, so
+  # a bare pattern here would kill every other fleet's daemon too. (A pre-upgrade daemon
+  # launched without --fleet is still matched by its unsuffixed pid file above.)
+  pkill -f "runner-farm.sh --fleet $FLEET autoscale-daemon" 2>/dev/null || true
 }
 autoscale_status() {
   if [ -f "$AUTOSCALE_PID" ] && kill -0 "$(cat "$AUTOSCALE_PID" 2>/dev/null)" 2>/dev/null; then
@@ -432,7 +533,7 @@ imageupdate_tick() {
 
 # long-running loop; re-reads config each tick so UI changes apply live
 imageupdate_daemon() {
-  exec 8>&- 7>&- 9>&- 2>/dev/null || true   # disown inherited lock fds (see autoscale_daemon)
+  exec 8>&- 7>&- 9>&- 6>&- 2>/dev/null || true   # disown inherited lock fds (see autoscale_daemon)
   log "image-update daemon up (every ${IMAGE_AUTOUPDATE_INTERVAL}s, drain-timeout ${IMAGE_DRAIN_TIMEOUT}s)"
   while true; do
     load_cfg
@@ -447,14 +548,14 @@ imageupdate_daemon() {
 imageupdate_start() {
   [ "$IMAGE_AUTOUPDATE" = "true" ] || return 0
   imageupdate_stop
-  nohup "$0" imageupdate-daemon >>"${RUNDIR}/imageupdate.log" 2>&1 &
+  nohup "$0" --fleet "$FLEET" imageupdate-daemon >>"$IMAGEUPDATE_LOG" 2>&1 &
   echo $! > "$IMAGEUPDATE_PID"
   log "image-update daemon started (pid $(cat "$IMAGEUPDATE_PID"))"
 }
 imageupdate_stop() {
   [ -f "$IMAGEUPDATE_PID" ] && kill "$(cat "$IMAGEUPDATE_PID")" 2>/dev/null
   rm -f "$IMAGEUPDATE_PID"
-  pkill -f "runner-farm.sh imageupdate-daemon" 2>/dev/null || true
+  pkill -f "runner-farm.sh --fleet $FLEET imageupdate-daemon" 2>/dev/null || true
 }
 imageupdate_status() {
   if [ -f "$IMAGEUPDATE_PID" ] && kill -0 "$(cat "$IMAGEUPDATE_PID" 2>/dev/null)" 2>/dev/null; then
@@ -656,7 +757,11 @@ public_repo_problem() {
 
 # docker login on the HOST so it can pull a private runner IMAGE (e.g. a private
 # GHCR image). No-op unless server+username+token are all configured.
-registry_login() {
+# `docker login` writes the host's single ~/.docker/config.json, so it is host-wide
+# state two fleets can race on — hence the host lock. (One credential set per registry
+# for the whole box is a known limit, tracked on the map, not solved here.)
+registry_login() { with_host_lock _registry_login; }
+_registry_login() {
   [ "$IMAGE_SOURCE" = "remote" ] || return 0
   [ -n "$REGISTRY_SERVER" ] || return 0
   local user="$REGISTRY_USERNAME" pass="$REGISTRY_TOKEN"
@@ -733,15 +838,25 @@ on_expected_network() {
 # ($MIRROR_NAME:5000) over that bridge — so it keeps working even in strict mode,
 # where host access is blocked. Otherwise it's published on the host ($MIRROR_PORT)
 # and reached via host.docker.internal (the legacy path).
-ensure_mirror() {
+ensure_mirror() { with_host_lock _ensure_mirror; }
+_ensure_mirror() {
   [ "$SHARED_IMAGE_CACHE" = "true" ] && [ "$DIND" = "true" ] || return 0
   mkdir -p "$CACHE_ROOT/registry-mirror"
-  # If the mirror is up but on the wrong network for the current mode (operator
-  # switched NETWORK_ISOLATION without a full Stop/Start), drop it so it's recreated
-  # below on the right network — otherwise runners can't reach it by name and strict's
-  # firewall keys off its stale IP. Its cache is on the pool volume, so this is cheap.
-  if docker ps -a --format '{{.Names}}' | grep -qx "$MIRROR_NAME" && ! on_expected_network "$MIRROR_NAME"; then
-    log "network mode changed -> recreating shared image cache ($MIRROR_NAME)"
+  # ONE mirror serves every fleet (its cache is the point — a mirror per fleet would
+  # re-pull the same layers N times), so it can no longer belong to a single network.
+  # An isolated fleet reaches it by name once its bridge is connected (below); a
+  # non-isolated fleet reaches it on the published docker0-gateway port, which only
+  # exists if the mirror was CREATED with -p. So recreate only in the one direction
+  # that a connect can't fix: this fleet needs the published port and there isn't one.
+  local prevnets=""
+  if docker ps -a --format '{{.Names}}' | grep -qx "$MIRROR_NAME" && [ "$NETWORK_ISOLATION" = "off" ] \
+     && [ "$(docker inspect -f '{{len .HostConfig.PortBindings}}' "$MIRROR_NAME" 2>/dev/null)" = "0" ]; then
+    # This recreate is driven by ONE fleet switching to `off`, but the mirror is shared:
+    # the other fleets' runners reach it by name on their own bridges, and a bare
+    # rm -f would silently drop those attachments until each fleet next provisioned.
+    # Remember them and reattach below.
+    prevnets="$(docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}' "$MIRROR_NAME" 2>/dev/null)"
+    log "network mode changed -> recreating shared image cache ($MIRROR_NAME) with a published port"
     docker rm -f "$MIRROR_NAME" >/dev/null 2>&1
   fi
   if ! docker ps --format '{{.Names}}' | grep -qx "$MIRROR_NAME"; then
@@ -778,7 +893,22 @@ ensure_mirror() {
         registry:2 2>&1)"; then
       err "could not start $MIRROR_NAME: ${mout##*: }"
       docker rm -f "$MIRROR_NAME" >/dev/null 2>&1   # clear the Created residue so the next cycle retries clean
+      return 1
     fi
+  fi
+  # Reattach the other fleets' bridges we just detached by recreating (above). `bridge`
+  # is Docker's default and is joined implicitly, so skip it.
+  local pn
+  for pn in $prevnets; do
+    [ "$pn" = bridge ] && continue
+    docker network connect "$pn" "$MIRROR_NAME" >/dev/null 2>&1 || true
+  done
+  # Join this fleet's bridge if it isn't already on it — the multi-fleet path: the
+  # mirror was created on whichever fleet started first, and every later isolated
+  # fleet attaches here instead of recreating it. Already-connected is not an error.
+  if [ "$NETWORK_ISOLATION" != "off" ]; then
+    ensure_network
+    docker network connect "$RUNNER_NETWORK" "$MIRROR_NAME" >/dev/null 2>&1 || true
   fi
 }
 
@@ -813,13 +943,24 @@ write_dind_config() {
 # number first so deletes don't renumber out from under us. Covers BOTH chains we
 # touch: DOCKER-USER (forwarded traffic) and INPUT (traffic to the host's own IPs).
 # Idempotent.
-firewall_clear() {
+#
+# Matching is on the WHOLE comment, not a substring: every rule we write is commented
+# "<FW_TAG>:<suffix>", and FW_TAG is now "ci-runner-farm:<fleet>", so a substring test
+# for the pre-upgrade bare tag "ci-runner-farm" would also match — and delete — every
+# other fleet's rules. A tag matches only when the comment is exactly "$tag:<suffix>"
+# with no further colon, which lets fleet `default` additionally sweep its own
+# pre-upgrade untagged-by-fleet rules (LEGACY_FW_TAG) without touching fleet `build`.
+firewall_clear() { with_host_lock _firewall_clear; }
+_firewall_clear() {
   command -v iptables >/dev/null 2>&1 || return 0
-  local chain n
-  for chain in DOCKER-USER INPUT; do
-    for n in $(iptables -w -L "$chain" --line-numbers -n 2>/dev/null \
-               | awk -v t="$FW_TAG" 'index($0,t){print $1}' | sort -rn); do
-      iptables -w -D "$chain" "$n" 2>/dev/null || true
+  local chain n tag
+  for tag in "$FW_TAG" "$LEGACY_FW_TAG"; do
+    [ -n "$tag" ] || continue
+    for chain in DOCKER-USER INPUT; do
+      for n in $(iptables -w -L "$chain" --line-numbers -n 2>/dev/null \
+                 | awk -v t="$tag" '{i=index($0,"/*"); if(!i) next; c=substr($0,i+2); j=index(c,"*/"); if(!j) next; c=substr(c,1,j-1); gsub(/[[:space:]]/,"",c); if(index(c,t ":")!=1) next; if(index(substr(c,length(t)+2),":")) next; print $1}' | sort -rn); do
+        iptables -w -D "$chain" "$n" 2>/dev/null || true
+      done
     done
   done
 }
@@ -828,7 +969,8 @@ firewall_clear() {
 # the mirror's IP back from docker (no pinned subnet -> no collisions). RETURN =
 # "leave DOCKER-USER, let Docker's normal ACCEPT handle it"; public destinations
 # match none of the DROPs and fall through, so internet egress still works.
-firewall_apply() {
+firewall_apply() { with_host_lock _firewall_apply; }
+_firewall_apply() {
   [ "$NETWORK_ISOLATION" = "strict" ] || return 0
   command -v iptables >/dev/null 2>&1 || { err "strict isolation needs iptables — egress NOT restricted"; return 0; }
   docker network inspect "$RUNNER_NETWORK" >/dev/null 2>&1 || { err "strict isolation: $RUNNER_NETWORK missing — egress NOT restricted"; return 0; }
@@ -836,8 +978,11 @@ firewall_apply() {
   s="$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' "$RUNNER_NETWORK" 2>/dev/null)"
   gw="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' "$RUNNER_NETWORK" 2>/dev/null)"
   [ -n "$s" ] || { err "strict isolation: could not resolve $RUNNER_NETWORK subnet — egress NOT restricted"; return 0; }
-  mip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$MIRROR_NAME" 2>/dev/null)"
-  firewall_clear
+  # Index the mirror's IP ON THIS FLEET'S network by name: the one mirror is now
+  # attached to every isolated fleet's bridge, so ranging over .Networks would
+  # concatenate several IPs into one unusable -d argument.
+  mip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${RUNNER_NETWORK}\"}}{{.IPAddress}}{{end}}" "$MIRROR_NAME" 2>/dev/null)"
+  _firewall_clear                        # already under the host lock — must not re-enter it
   # Order matters (top-down): allow mirror + established replies, THEN drop host +
   # every private range. Inserting at increasing indices keeps them in this order
   # ahead of Docker's trailing RETURN.
@@ -880,6 +1025,7 @@ build_args() {
     --name "$name" --hostname "$name"
     --pids-limit=4096
     --label "${MANAGED_LABEL%=*}=true"
+    --label "${FLEET_LABEL}=${FLEET}"
     --label "net.unraid.ci-runner-farm.index=${idx}"
     --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen)"
     -e RUNNER_NAME="$(host)-${name}"
@@ -965,8 +1111,17 @@ start_one() {
   if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
     log "runner $name already exists; skipping"; return 0
   fi
+  # Mint the registration token OUTSIDE the host lock: it is a GitHub round trip, and
+  # holding a box-wide lock across it would serialize every fleet's startup on network
+  # latency.
   build_args "$idx" || { err "runner $name not started (registration-token error)"; return 1; }
   log "starting $name (cpus=$RUNNER_CPUS mem=$RUNNER_MEMORY scope=$GH_SCOPE)"
+  # Cap check and `docker run` under ONE hold of the host lock. Checking and then
+  # releasing would let two fleets both pass at HOST_MAX-1 and land the box one over.
+  with_host_lock _run_one
+}
+_run_one() {
+  host_cap_ok || return 1                       # box-wide ceiling, checked per container
   docker run "${ARGS[@]}" >/dev/null
 }
 
@@ -1028,8 +1183,13 @@ provision_base() {
 # egress firewall (firewall_apply is a no-op unless NETWORK_ISOLATION=strict).
 provision_preflight() {
   provision_base || return 1
-  firewall_clear                                # drop stale rules (e.g. strict -> off/isolate)
-  firewall_apply                                # re-add egress rules (no-op unless strict)
+  # Clear + re-apply under ONE host-lock acquisition: taken separately, another fleet
+  # could program its rules in the gap between this fleet's clear and its apply.
+  with_host_lock _provision_firewall
+}
+_provision_firewall() {
+  _firewall_clear                               # drop stale rules (e.g. strict -> off/isolate)
+  _firewall_apply                               # re-add egress rules (no-op unless strict)
 }
 
 # Serialize all fleet mutation (UI start/stop/restart/scale/recycle AND the autoscale
@@ -1042,10 +1202,38 @@ provision_preflight() {
 with_fleet_lock() {
   local mode="$1"; shift
   if [ "$mode" = try ]; then
-    ( flock -n 8 || exit 0; "$@" ) 8>"$RUNDIR/fleet.lock"
+    ( flock -n 8 || exit 0; "$@" ) 8>"$FLEET_LOCK"
   else
-    ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$RUNDIR/fleet.lock"
+    ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$FLEET_LOCK"
   fi
+}
+
+# Serialize the things every fleet SHARES, on a second lock (fd 6): the one
+# pull-through mirror, the host's iptables chains, the host-wide `docker login`, and
+# the host runner cap. Without it two fleets starting at once race into a duplicate
+# mirror container or interleave iptables inserts. Lock order is ALWAYS fleet -> host
+# (fd 8 then fd 6) and never the reverse — the wrapped functions must not re-enter it,
+# so callers wrap, bodies don't (see _firewall_apply calling _firewall_clear directly).
+with_host_lock() {
+  ( flock -w 30 6 || { err "host busy (another fleet is provisioning the shared mirror/firewall) — try again"; exit 1; }; "$@" ) 6>"$HOST_LOCK"
+}
+
+# Every managed runner on the box, whatever fleet — the host cap's denominator.
+host_managed_count() { docker ps -a --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | grep -c . ; }
+# Per-fleet tally for the cap's error message, so "why was my legal target refused?"
+# is answerable from the message alone.
+host_fleet_usage() {
+  docker ps -a --filter "label=${MANAGED_LABEL}" --format "{{.Label \"${FLEET_LABEL}\"}}" \
+    | awk '{print ($0==""?"default":$0)}' | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}'
+}
+# HARD_MAX bounds one fleet; HOST_MAX bounds the box. Without it N fleets each under
+# their own cap can still exhaust the host. Call under with_host_lock.
+HOST_MAX=64
+host_cap_ok() {
+  local total; total="$(host_managed_count)"
+  [ "${total:-0}" -lt "$HOST_MAX" ] && return 0
+  err "host runner cap reached: $total managed runner(s) across all fleets (HOST_MAX=$HOST_MAX). In use: $(host_fleet_usage)— scale another fleet down first"
+  return 1
 }
 cmd_restart() { cmd_stop; cmd_start; }
 
@@ -1074,7 +1262,7 @@ cmd_mirror_up() {
 # the fleet is fully migrated.
 reconcile_stale_runners() {
   local cur c gen; cur="$(crf_confgen)"
-  for c in $(docker ps --filter "label=${MANAGED_LABEL}" --format '{{.Names}}' | sort -V); do
+  for c in $(managed_running_names); do
     [ -n "$c" ] || continue
     gen="$(runner_confgen "$c")"
     [ "$gen" = "$cur" ] && continue                  # already on the current config
@@ -1091,7 +1279,7 @@ reconcile_stale_runners() {
         # shrank and no later pass can retry a runner that no longer exists. Record it
         # so the drain reports the loss instead of a clean-migration success.
         log "reconcile: $c was removed but its replacement failed to start — fleet is down one runner"
-        echo "$c" >> "$RUNDIR/reconcile.shrink"
+        echo "$c" >> "$RECONCILE_SHRINK"
       fi
     fi
     return 0                                          # one per pass; the drain/tick loop re-invokes
@@ -1111,7 +1299,7 @@ cmd_reconcile_drain() {
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
   exec 8>&- 9>&- 2>/dev/null || true
   local deadline announced=0 lost
-  rm -f "$RUNDIR/reconcile.shrink"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
+  rm -f "$RECONCILE_SHRINK"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
   deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
   while :; do
     load_cfg
@@ -1125,7 +1313,7 @@ cmd_reconcile_drain() {
     [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout (finishing jobs or wedged in startup) — they'll migrate on their next idle, or Restart the fleet to force it now"; break; }
     sleep 15
   done
-  lost="$([ -f "$RUNDIR/reconcile.shrink" ] && grep -c . "$RUNDIR/reconcile.shrink" 2>/dev/null || echo 0)"
+  lost="$([ -f "$RECONCILE_SHRINK" ] && grep -c . "$RECONCILE_SHRINK" 2>/dev/null || echo 0)"
   if [ "$announced" = 1 ]; then
     if [ "${lost:-0}" -gt 0 ]; then
       if [ "$(count_stale_runners)" -eq 0 ]; then
@@ -1137,14 +1325,14 @@ cmd_reconcile_drain() {
       log "reconcile: fleet is now on the current config"
     fi
   fi
-  rm -f "$RUNDIR/reconcile.shrink"
+  rm -f "$RECONCILE_SHRINK"
 }
 
 # Kick off the drain detached so the Settings Apply returns immediately (recycling is
 # slow). Safe no-op when nothing is stale (the drain exits on the first count). Output
 # shows in the Apply progress frame — human text, not JSON.
 cmd_reconcile_config() {
-  nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 &
+  nohup "$0" --fleet "$FLEET" reconcile-drain >>"$FARM_LOG" 2>&1 &
   local msg="Configuration saved. Any runner on a previous config will migrate as it goes idle (busy jobs finish first)."
   # A NETWORK_ISOLATION change applies per-runner only as each recycles — so running
   # jobs keep their OLD network until they finish. Say so plainly: a gradual, background
@@ -1172,7 +1360,7 @@ cmd_start() {
   for c in $(managed_names); do
     [ -n "$c" ] && ! on_expected_network "$c" && { need_migrate=1; break; }
   done
-  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; nohup "$0" reconcile-drain >>"$RUNDIR/autoscale.log" 2>&1 & }
+  [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; nohup "$0" --fleet "$FLEET" reconcile-drain >>"$FARM_LOG" 2>&1 & }
   # bring back any runners Unraid/Docker left exited (array stop, daemon restart)
   start_stopped_managed
   # with autoscaling on, start the floor (MIN) and let the daemon grow to demand
@@ -1213,15 +1401,24 @@ cmd_stop() {
   else
     echo "$names" | while read -r c; do [ -n "$c" ] && { log "stopping $c (graceful deregister)"; remove_runner "$c"; }; done
   fi
-  # drop the shared image-cache container so uninstall/Stop don't orphan it
+  # Drop the shared image-cache container so uninstall/Stop don't orphan it — but it
+  # is now shared, so only once NO fleet has a runner left. Stopping one of three
+  # fleets must not pull the mirror out from under the other two.
   if docker ps -a --format '{{.Names}}' | grep -qx "$MIRROR_NAME"; then
-    log "removing shared image cache ($MIRROR_NAME)"
-    docker rm -f "$MIRROR_NAME" >/dev/null 2>&1 || true
+    if [ "$(host_managed_count)" -eq 0 ]; then
+      log "removing shared image cache ($MIRROR_NAME)"
+      docker rm -f "$MIRROR_NAME" >/dev/null 2>&1 || true
+    else
+      log "leaving shared image cache ($MIRROR_NAME) up — still in use by: $(host_fleet_usage)"
+    fi
   fi
   # tear down the strict-mode egress rules and the now-empty dedicated network
   firewall_clear
   if [ "$NETWORK_ISOLATION" != "off" ] && docker network inspect "$RUNNER_NETWORK" >/dev/null 2>&1; then
     log "removing isolated runner network ($RUNNER_NETWORK)"
+    # The shared mirror may still be attached (see _ensure_mirror) and would block the
+    # rm; detach it first so this fleet's bridge goes away without disturbing others.
+    docker network disconnect -f "$RUNNER_NETWORK" "$MIRROR_NAME" >/dev/null 2>&1 || true
     docker network rm "$RUNNER_NETWORK" >/dev/null 2>&1 || true
   fi
 }
@@ -1293,7 +1490,7 @@ cmd_image_info_json() {
   fi
   local created size; created="$(docker image inspect -f '{{.Created}}' "$img")"
   size="$(docker image inspect -f '{{.Size}}' "$img")"
-  local df="$CFGDIR/Dockerfile"
+  local df="$DOCKERFILE"
   [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
   local base; base="$(grep -m1 '^FROM ' "$df" 2>/dev/null | awk '{print $2}')"
   local inuse=0 c cid
@@ -1316,10 +1513,10 @@ cmd_queued_refresh() {
   # Sum queued workflow runs across GH_REPOS into a cache file. Invoked in the
   # background from cmd_queued_json so the UI poll never blocks on 20+ curls.
   [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
+  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) -1" > "$QUEUED_CACHE"; return 0; }
   local total=0 got=0 r n body tmpd i=0
   tmpd="$(mktemp -d 2>/dev/null)"
-  [ -n "$tmpd" ] || { echo "$(date +%s) -1" > "$RUNDIR/queued.cache"; return 0; }
+  [ -n "$tmpd" ] || { echo "$(date +%s) -1" > "$QUEUED_CACHE"; return 0; }
   gh_fetch_all "/actions/runs?status=queued&per_page=1" "$tmpd"
   for r in $GH_REPOS; do
     [ -n "$r" ] || continue
@@ -1332,7 +1529,7 @@ cmd_queued_refresh() {
   # total=-1 signals "unavailable" (no token / every repo query failed) so the UI
   # shows a dash instead of a confident "0 queued" — same sentinel as stats/usage.
   [ "$got" = "1" ] || total=-1
-  echo "$(date +%s) $total" > "$RUNDIR/queued.cache"
+  echo "$(date +%s) $total" > "$QUEUED_CACHE"
 }
 
 # Warm dependency caches under CACHE_ROOT — safe to clear even while runners are
@@ -1394,8 +1591,8 @@ cmd_cache_usage_refresh() {
   # du can be slow on a multi-GB cache, so this runs detached and the result is
   # cached; the UI reads the cache and only triggers a refresh when it is stale.
   local root total=0 pkg=0 d n
-  root="$(crf_safe_cache_root 2>/dev/null)" || { echo "$(date +%s) -1 0" > "$RUNDIR/cache-usage.cache"; return 0; }
-  [ -d "$root" ] || { echo "$(date +%s) 0 0" > "$RUNDIR/cache-usage.cache"; return 0; }
+  root="$(crf_safe_cache_root 2>/dev/null)" || { echo "$(date +%s) -1 0" > "$CACHEUSE_CACHE"; return 0; }
+  [ -d "$root" ] || { echo "$(date +%s) 0 0" > "$CACHEUSE_CACHE"; return 0; }
   # Scope the "cache" total to the warm caches — exclude each runner's Docker data
   # root (docker/), the workspace (work/), the image mirror, and DinD logs, which are
   # the fleet's Docker storage (tens of GB per runner), not clearable cache.
@@ -1403,18 +1600,18 @@ cmd_cache_usage_refresh() {
   for d in $CACHE_PKG_DIRS; do
     [ -d "$root/$d" ] && { n="$(du -sb "$root/$d" 2>/dev/null | cut -f1)"; pkg=$(( pkg + ${n:-0} )); }
   done
-  echo "$(date +%s) ${total:--1} ${pkg:-0}" > "$RUNDIR/cache-usage.cache"
+  echo "$(date +%s) ${total:--1} ${pkg:-0}" > "$CACHEUSE_CACHE"
 }
 
 cmd_cache_usage_json() {
   local now ts total pkg age=999999
   now=$(date +%s)
-  if [ -f "$RUNDIR/cache-usage.cache" ]; then
-    read -r ts total pkg < "$RUNDIR/cache-usage.cache"
+  if [ -f "$CACHEUSE_CACHE" ]; then
+    read -r ts total pkg < "$CACHEUSE_CACHE"
     age=$(( now - ${ts:-0} ))
   fi
   if [ "$age" -gt 300 ]; then
-    ( flock -n 9 || exit 0; "$0" cache-usage-refresh ) 9>"$RUNDIR/cache-usage.lock" >/dev/null 2>&1 &
+    ( flock -n 9 || exit 0; "$0" --fleet "$FLEET" cache-usage-refresh ) 9>"$CACHEUSE_LOCK" >/dev/null 2>&1 &
   fi
   echo "{\"total\":${total:--1},\"pkg\":${pkg:-0},\"age\":$age}"
 }
@@ -1428,7 +1625,7 @@ cmd_cache_clear_pkg() {
     [ -d "$root/$d" ] || continue
     if rm -rf "${root:?}/${d:?}/"* 2>/dev/null; then removed=$((removed+1)); else failed=$((failed+1)); fi
   done
-  ( "$0" cache-usage-refresh ) >/dev/null 2>&1 &
+  ( "$0" --fleet "$FLEET" cache-usage-refresh ) >/dev/null 2>&1 &
   if [ "$failed" -gt 0 ]; then
     log "cache clear: $failed dir(s) could not be removed under $root"
     echo "{\"ok\":false,\"error\":\"could not remove $failed dir(s)\",\"cleared\":$removed}"; return 1
@@ -1441,10 +1638,10 @@ cmd_stats_refresh() {
   # Tally recent workflow-run conclusions across GH_REPOS. Detached + cached so
   # the per-repo API sweep never blocks the UI (see queued for the pattern).
   [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
-  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
+  [ -n "$ACCESS_TOKEN" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$STATS_CACHE"; return 0; }
   local ok=0 fail=0 cancel=0 other=0 total got=0 r body c tmpd i=0
   tmpd="$(mktemp -d 2>/dev/null)"
-  [ -n "$tmpd" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$RUNDIR/stats.cache"; return 0; }
+  [ -n "$tmpd" ] || { echo "$(date +%s) 0 0 0 0 -1" > "$STATS_CACHE"; return 0; }
   gh_fetch_all "/actions/runs?per_page=50" "$tmpd"
   for r in $GH_REPOS; do
     [ -n "$r" ] || continue
@@ -1463,18 +1660,18 @@ cmd_stats_refresh() {
   rm -rf "$tmpd"
   # total=-1 signals "stats unavailable" (bad token / API down) vs a real zero.
   if [ "$got" = "1" ]; then total=$((ok+fail+cancel+other)); else total=-1; fi
-  echo "$(date +%s) $ok $fail $cancel $other $total" > "$RUNDIR/stats.cache"
+  echo "$(date +%s) $ok $fail $cancel $other $total" > "$STATS_CACHE"
 }
 
 cmd_stats_json() {
   local now ts ok fail cancel other total age=999999
   now=$(date +%s)
-  if [ -f "$RUNDIR/stats.cache" ]; then
-    read -r ts ok fail cancel other total < "$RUNDIR/stats.cache"
+  if [ -f "$STATS_CACHE" ]; then
+    read -r ts ok fail cancel other total < "$STATS_CACHE"
     age=$(( now - ${ts:-0} ))
   fi
   if [ "$age" -gt 300 ]; then
-    ( flock -n 9 || exit 0; "$0" stats-refresh ) 9>"$RUNDIR/stats.lock" >/dev/null 2>&1 &
+    ( flock -n 9 || exit 0; "$0" --fleet "$FLEET" stats-refresh ) 9>"$STATS_LOCK" >/dev/null 2>&1 &
   fi
   echo "{\"ok\":${ok:-0},\"fail\":${fail:-0},\"cancel\":${cancel:-0},\"other\":${other:-0},\"total\":${total:--1},\"age\":$age}"
 }
@@ -1482,14 +1679,14 @@ cmd_stats_json() {
 cmd_queued_json() {
   local now ts count age=999999
   now=$(date +%s)
-  if [ -f "$RUNDIR/queued.cache" ]; then
-    read -r ts count < "$RUNDIR/queued.cache"
+  if [ -f "$QUEUED_CACHE" ]; then
+    read -r ts count < "$QUEUED_CACHE"
     age=$(( now - ${ts:-0} ))
   fi
   # flock, not a plain lock file: the advisory lock is released by the kernel
   # even on SIGKILL/reboot, so a killed refresh can never wedge future refreshes.
   if [ "$age" -gt 60 ]; then
-    ( flock -n 9 || exit 0; "$0" queued-refresh ) 9>"$RUNDIR/queued.lock" >/dev/null 2>&1 &
+    ( flock -n 9 || exit 0; "$0" --fleet "$FLEET" queued-refresh ) 9>"$QUEUED_LOCK" >/dev/null 2>&1 &
   fi
   echo "{\"queued\":${count:--1},\"age\":$age}"
 }
@@ -1614,17 +1811,17 @@ cmd_usage_refresh() {
   # cache-root (df) warning and keep the public-repo security cache warm, so
   # cmd_status_json never runs df or the per-repo curls inline (and there's no
   # unlocked stampede — this refresher is flock-guarded via usage.lock).
-  cache_root_problem > "$RUNDIR/warn.cache" 2>/dev/null
+  cache_root_problem > "$WARN_CACHE" 2>/dev/null
   # Write the public-repo security verdict to a cache the poll reads (empty when
   # there's nothing to warn about, which also clears a stale warning after the config
   # is fixed) — so cmd_status_json never runs the per-repo curls on its own hot path.
-  public_repo_problem > "$RUNDIR/sec.cache" 2>/dev/null
+  public_repo_problem > "$SEC_CACHE" 2>/dev/null
   local names; names="$(managed_names)"
-  [ -n "$names" ] || { : > "$RUNDIR/usage.cache"; return 0; }
+  [ -n "$names" ] || { : > "$USAGE_CACHE"; return 0; }
   local statsraw
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   statsraw="$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}' $names 2>/dev/null)"
-  : > "$RUNDIR/usage.cache.tmp"
+  : > "$USAGE_CACHE.tmp"
   local c
   for c in $names; do
     [ -z "$c" ] && continue
@@ -1649,9 +1846,9 @@ cmd_usage_refresh() {
       fi
     fi
     printf '%s %s %s %s %s %s %s %s %s %s\n' "$c" "${cpu:-0}" "${mem_mib:-0}" "$phase" \
-      "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$RUNDIR/usage.cache.tmp"
+      "$(_b64 "$job")" "$jstarted" "$(_b64 "$jrepo")" "$jpr" "$(_b64 "$jbranch")" "$jrun" >> "$USAGE_CACHE.tmp"
   done
-  mv "$RUNDIR/usage.cache.tmp" "$RUNDIR/usage.cache" 2>/dev/null
+  mv "$USAGE_CACHE.tmp" "$USAGE_CACHE" 2>/dev/null
 }
 
 cmd_status_json() {
@@ -1662,9 +1859,9 @@ cmd_status_json() {
   # limits), never per runner; trigger a cache refresh when stale.
   local usage="" uage=999 nowu
   nowu=$(date +%s)
-  if [ -f "$RUNDIR/usage.cache" ]; then
-    usage="$(cat "$RUNDIR/usage.cache" 2>/dev/null)"
-    uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
+  if [ -f "$USAGE_CACHE" ]; then
+    usage="$(cat "$USAGE_CACHE" 2>/dev/null)"
+    uage=$(( nowu - $(stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0) ))
   fi
   # Trigger the background refresh whenever the cache is stale — even with an EMPTY
   # fleet, so the cache-root (df) and public-repo security warnings stay fresh during
@@ -1676,7 +1873,7 @@ cmd_status_json() {
   # half the background docker load.
   local rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
   if [ "$uage" -gt "$rthresh" ]; then
-    ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
+    ( flock -n 9 || exit 0; "$0" --fleet "$FLEET" usage-refresh ) 9>"$USAGE_LOCK" >/dev/null 2>&1 &
   fi
   # ONE batched inspect for the whole fleet's live state + cpu/mem limits (perf: was
   # three separate docker inspects per runner). {{.Name}} carries a leading '/'.
@@ -1719,11 +1916,11 @@ cmd_status_json() {
   out+="]"
   local as="off"; [ "$AUTOSCALE" = "true" ] && as="$(autoscale_status)"
   local iu="off"; [ "$IMAGE_AUTOUPDATE" = "true" ] && iu="$(imageupdate_status) (every $((IMAGE_AUTOUPDATE_INTERVAL/60))m)"
-  local warn; warn="$(cat "$RUNDIR/warn.cache" 2>/dev/null | json_escape)"
+  local warn; warn="$(cat "$WARN_CACHE" 2>/dev/null | json_escape)"
   # Read the security verdict from cache (written by cmd_usage_refresh) — never call
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
-  local sec; sec="$(cat "$RUNDIR/sec.cache" 2>/dev/null | json_escape)"
+  local sec; sec="$(cat "$SEC_CACHE" 2>/dev/null | json_escape)"
   echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
 }
 
@@ -1735,14 +1932,31 @@ cmd_status_json() {
 # broadcast private repo/job metadata to the whole LAN. The widget only renders these
 # counts anyway. One batched inspect + the shared usage cache; triggers the same
 # background refresh as status-json so busy/idle stay fresh when only the tile is open.
+#
+# The widget is a BOX-level tile, so with several fleets configured it must sum them:
+# without an explicit --fleet this fans out (one re-exec per fleet — each needs its own
+# resolved config and label filter) and adds the counts up. The JSON shape is identical
+# either way, so the widget never learns about fleets.
 cmd_dashboard_json() {
+  [ "$FLEET_EXPLICIT" = 1 ] && { printf '{"count":%s,"up":%s,"busy":%s,"idle":%s}\n' $(dashboard_counts); return 0; }
+  local f c u b i tc=0 tu=0 tb=0 ti=0
+  for f in $(list_fleets); do
+    read -r c u b i <<< "$("$0" --fleet "$f" dashboard-counts)"
+    tc=$((tc+${c:-0})); tu=$((tu+${u:-0})); tb=$((tb+${b:-0})); ti=$((ti+${i:-0}))
+  done
+  printf '{"count":%s,"up":%s,"busy":%s,"idle":%s}\n' "$tc" "$tu" "$tb" "$ti"
+}
+
+# "count up busy idle" for the current fleet — the summable form cmd_dashboard_json
+# aggregates and the JSON above is rendered from.
+dashboard_counts() {
   local names up=0 busy=0 idle=0 c st ph usage uage nowu inspraw rthresh
   names="$(managed_names)"
   nowu=$(date +%s); uage=999
-  [ -f "$RUNDIR/usage.cache" ] && uage=$(( nowu - $(stat -c %Y "$RUNDIR/usage.cache" 2>/dev/null || echo 0) ))
+  [ -f "$USAGE_CACHE" ] && uage=$(( nowu - $(stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0) ))
   rthresh=4; [ "$(printf '%s\n' "$names" | grep -c .)" -gt 20 ] && rthresh=9
-  [ "$uage" -gt "$rthresh" ] && ( flock -n 9 || exit 0; "$0" usage-refresh ) 9>"$RUNDIR/usage.lock" >/dev/null 2>&1 &
-  usage="$([ -f "$RUNDIR/usage.cache" ] && cat "$RUNDIR/usage.cache" 2>/dev/null)"
+  [ "$uage" -gt "$rthresh" ] && ( flock -n 9 || exit 0; "$0" --fleet "$FLEET" usage-refresh ) 9>"$USAGE_LOCK" >/dev/null 2>&1 &
+  usage="$([ -f "$USAGE_CACHE" ] && cat "$USAGE_CACHE" 2>/dev/null)"
   # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
   [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Status}}' $names 2>/dev/null)"
   for c in $names; do
@@ -1753,7 +1967,102 @@ cmd_dashboard_json() {
     ph="$(printf '%s\n' "$usage" | grep -m1 -- "^${c} " | awk '{print $4}')"
     case "$ph" in busy) busy=$((busy+1)) ;; idle) idle=$((idle+1)) ;; esac
   done
-  printf '{"count":%s,"up":%s,"busy":%s,"idle":%s}\n' "$(printf '%s\n' "$names" | grep -c .)" "$up" "$busy" "$idle"
+  printf '%s %s %s %s\n' "$(printf '%s\n' "$names" | grep -c .)" "$up" "$busy" "$idle"
+}
+
+# ── Fleet lifecycle ──────────────────────────────────────────────────────────
+# Every configured fleet: `default` (the legacy cfg, which always exists even before
+# anything is written to it) plus one per fleets/<name>.cfg.
+list_fleets() {
+  echo default
+  local f n
+  for f in "$FLEETDIR"/*.cfg; do
+    [ -f "$f" ] || continue
+    n="${f##*/}"; n="${n%.cfg}"
+    [ "$n" = default ] && continue                  # can't shadow the legacy fleet
+    printf '%s\n' "$n"
+  done
+}
+
+# Run one of this script's own verbs once per fleet by RE-EXECING with --fleet. Not a
+# loop over globals: fleet resolution decides config, names, locks and label filters at
+# startup, so a fresh process per fleet is the only way to get a clean resolution.
+# Returns the last non-zero exit, so a failure in one fleet is visible without
+# aborting the others (boot must still bring up fleet 3 if fleet 2 has no token).
+for_each_fleet() {
+  local f rc=0
+  for f in $(list_fleets); do
+    "$0" --fleet "$f" "$@" || rc=$?
+  done
+  return $rc
+}
+
+# {fleets:[{name,mode,configured,running}]} — the fleet picker's source. One re-exec
+# per fleet (each needs its own resolved config), aggregated here.
+cmd_fleets_json() {
+  local f e first=1 out=""
+  for f in $(list_fleets); do
+    e="$("$0" --fleet "$f" fleet-entry-json)"
+    [ -n "$e" ] || continue                         # a failed re-exec must not emit `[,]`
+    [ $first -eq 0 ] && out+=","
+    out+="$e"; first=0
+  done
+  printf '{"fleets":[%s]}\n' "$out"
+}
+# One fleet's entry, emitted in the resolved context of that fleet.
+cmd_fleet_entry_json() {
+  printf '{"name":"%s","mode":"%s","configured":%s,"running":%s}' \
+    "$(printf '%s' "$FLEET" | json_escape)" "$(printf '%s' "$FLEET_MODE" | json_escape)" \
+    "${RUNNER_COUNT:-0}" "$(managed_running_names | grep -c .)"
+}
+
+# Create an empty fleet: just its cfg file. Empty means "every default", exactly like a
+# fresh install — defaults stay in their three places and are never copied to flash.
+cmd_fleet_create() {
+  local name="$1"
+  printf '%s' "$name" | grep -qE '^[a-z][a-z0-9-]{0,30}$' || { echo '{"ok":false,"error":"invalid fleet name (lowercase letter, then letters/digits/dashes, max 31)"}'; return 1; }
+  [ "$name" = default ] && { echo '{"ok":false,"error":"fleet default always exists"}'; return 1; }
+  [ -f "$(cfg_path "$name")" ] && { echo '{"ok":false,"error":"fleet already exists"}'; return 1; }
+  mkdir -p "$FLEETDIR" || { echo '{"ok":false,"error":"could not create the fleets directory"}'; return 1; }
+  : > "$(cfg_path "$name")" || { echo '{"ok":false,"error":"could not write the fleet config"}'; return 1; }
+  log "fleet created: $name"
+  echo "{\"ok\":true,\"action\":\"fleet-create\",\"fleet\":\"$(printf '%s' "$name" | json_escape)\"}"
+}
+
+# Rename moves the fleet's OWN keys to the new cfg path and leaves the global layer
+# where it is (it belongs to the box, not the fleet).
+#
+# Refused while the fleet still owns containers, like delete. A fleet's identity IS its
+# label and its name prefix, and neither can be changed on a live container — so a
+# "rename and drain" would leave every runner labelled with a fleet that no longer has
+# a config, invisible to both the old name and the new one, until the drain finished.
+# Stopping first costs the operator one click and removes that window entirely.
+cmd_fleet_rename() {
+  local old="$1" new="$2" n
+  [ "$old" = default ] && { echo '{"ok":false,"error":"fleet default cannot be renamed (it is the legacy config path)"}'; return 1; }
+  printf '%s' "$new" | grep -qE '^[a-z][a-z0-9-]{0,30}$' || { echo '{"ok":false,"error":"invalid fleet name"}'; return 1; }
+  [ "$new" = default ] && { echo '{"ok":false,"error":"fleet default always exists"}'; return 1; }
+  [ -f "$(cfg_path "$old")" ] || { echo '{"ok":false,"error":"no such fleet"}'; return 1; }
+  [ -f "$(cfg_path "$new")" ] && { echo '{"ok":false,"error":"a fleet with that name already exists"}'; return 1; }
+  n="$(docker ps -a --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${old}" --format '{{.Names}}' | grep -c .)"
+  [ "${n:-0}" -gt 0 ] && { echo "{\"ok\":false,\"error\":\"fleet still has $n container(s) — stop it first, then rename\"}"; return 1; }
+  mv "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not move the fleet config"}'; return 1; }
+  [ -f "${FLEETDIR}/${old}.Dockerfile" ] && mv "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
+  log "fleet renamed: $old -> $new"
+  echo "{\"ok\":true,\"action\":\"fleet-rename\",\"fleet\":\"$(printf '%s' "$new" | json_escape)\"}"
+}
+
+# Refuse while the fleet still owns containers — deleting its config would orphan them
+# under a label nothing resolves any more.
+cmd_fleet_delete() {
+  local name="$1" n
+  [ "$name" = default ] && { echo '{"ok":false,"error":"fleet default cannot be deleted (it is the legacy config path)"}'; return 1; }
+  [ -f "$(cfg_path "$name")" ] || { echo '{"ok":false,"error":"no such fleet"}'; return 1; }
+  n="$(docker ps -a --filter "label=${MANAGED_LABEL}" --filter "label=${FLEET_LABEL}=${name}" --format '{{.Names}}' | grep -c .)"
+  [ "${n:-0}" -gt 0 ] && { echo "{\"ok\":false,\"error\":\"fleet still has $n container(s) — stop it first\"}"; return 1; }
+  rm -f "$(cfg_path "$name")" "${FLEETDIR}/${name}.Dockerfile"
+  log "fleet deleted: $name"
+  echo "{\"ok\":true,\"action\":\"fleet-delete\",\"fleet\":\"$(printf '%s' "$name" | json_escape)\"}"
 }
 
 cmd_logs() { docker logs --tail "${2:-100}" -f "${NAME_PREFIX}-${1:-1}"; }
@@ -1829,13 +2138,13 @@ cmd_build_async() {
   # Log + lock on tmpfs (RUNDIR), NOT flash: a docker build streams thousands of
   # lines and appending each to /boot would hammer the USB stick. The log is only
   # needed for the current session's build, so losing it on reboot is fine.
-  local log="$RUNDIR/build.log" lock="$RUNDIR/build.lock" inner
+  local log="$BUILD_LOG" lock="$BUILD_LOCK" inner
   mkdir -p "$RUNDIR" 2>/dev/null
   exec 9> "$lock" || { echo '{"ok":false,"error":"could not open the build lock (runtime dir not writable?)"}'; return 0; }
   flock -n 9; local rc=$?
   if [ "$rc" -eq 0 ]; then
     : > "$log"
-    inner="'$0' build-image >> '$log' 2>&1; echo \"__BUILD_RC__=\$?\" >> '$log'"
+    inner="'$0' --fleet '$FLEET' build-image >> '$log' 2>&1; echo \"__BUILD_RC__=\$?\" >> '$log'"
     nohup sh -c "$inner" </dev/null >/dev/null 2>&1 &
     echo '{"ok":true,"action":"build-image"}'
   elif [ "$rc" -eq 1 ]; then
@@ -1849,7 +2158,7 @@ cmd_build_async() {
 # live (the [r] bracket-glob keeps this pgrep from matching its own cmdline); rc parses
 # from the __BUILD_RC__ sentinel only once the build is no longer running.
 cmd_build_status() {
-  local log="$RUNDIR/build.log" txt running rc n disp
+  local log="$BUILD_LOG" txt running rc n disp
   txt="$([ -f "$log" ] && tail -n 120 "$log")"
   if pgrep -f '[r]unner-farm.sh build-image' >/dev/null 2>&1; then running=true; else running=false; fi
   rc=null
@@ -1864,7 +2173,7 @@ cmd_build_status() {
 # {ok,log} — live farm activity for the Fleet log idle state: the autoscale daemon log
 # (tmpfs) or boot.log before the daemon ran, minus docker's noisy swap-limit warning.
 cmd_farm_log() {
-  local as="$RUNDIR/autoscale.log" bt="$CFGDIR/boot.log" src txt
+  local as="$FARM_LOG" bt="$CFGDIR/boot.log" src txt
   src="$as"; [ -f "$as" ] || src="$bt"
   txt="$([ -f "$src" ] && tail -n 150 "$src" | grep -v 'swap limit capabilities' | tail -n 60)"
   printf '{"ok":true,"log":%s}\n' "$(printf '%s' "$txt" | json_string)"
@@ -1873,7 +2182,7 @@ cmd_farm_log() {
 cmd_build_image() {
   # Build the runner image from the editable Dockerfile. Uses a CLEAN temp
   # context (only the Dockerfile) so the token/config never enter the build.
-  local df="$CFGDIR/Dockerfile"
+  local df="$DOCKERFILE"
   [ -f "$df" ] || df="/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile"
   [ -f "$df" ] || { err "no Dockerfile found"; return 1; }
   local ctx; ctx="$(mktemp -d)"
@@ -1915,9 +2224,12 @@ cmd_boot_autostart() {
   with_fleet_lock wait cmd_start
 }
 
+# Verbs invoked WITHOUT an explicit --fleet that must cover the whole box: boot brings
+# every fleet up, and the Docker-stopping hook must stop every fleet's daemons. Fanning
+# out here (not inside the functions) keeps `stop` -> autoscale_stop a single-fleet call.
 case "${1:-status}" in
   start)        with_fleet_lock wait cmd_start ;;
-  boot-autostart)   cmd_boot_autostart ;;
+  boot-autostart)   if [ "$FLEET_EXPLICIT" = 1 ]; then cmd_boot_autostart; else for_each_fleet boot-autostart; fi ;;
   stop)         with_fleet_lock wait cmd_stop ;;
   restart)      with_fleet_lock wait cmd_restart ;;
   mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
@@ -1925,6 +2237,15 @@ case "${1:-status}" in
   status)       cmd_status ;;
   status-json)  cmd_status_json ;;
   dashboard-json) cmd_dashboard_json ;;
+  dashboard-counts) dashboard_counts ;;
+  fleets-json)  cmd_fleets_json ;;
+  fleet-entry-json) cmd_fleet_entry_json ;;
+  # Lifecycle mutates shared flash state (the fleets/ dir) and guards on a container
+  # count, so it takes the host lock: two concurrent renames of one fleet could
+  # otherwise both pass the "no containers" check.
+  fleet-create) with_host_lock cmd_fleet_create "${2:?usage: fleet-create <name>}" ;;
+  fleet-rename) with_host_lock cmd_fleet_rename "${2:?usage: fleet-rename <old> <new>}" "${3:?usage: fleet-rename <old> <new>}" ;;
+  fleet-delete) with_host_lock cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
   queued-refresh) cmd_queued_refresh ;;
@@ -1936,7 +2257,7 @@ case "${1:-status}" in
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
   reconcile-config) cmd_reconcile_config ;;
-  reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$RUNDIR/autoscale.log"; exit 0; }; cmd_reconcile_drain ) 7>"$RUNDIR/reconcile.lock" ;;
+  reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$FARM_LOG"; exit 0; }; cmd_reconcile_drain ) 7>"$RECONCILE_LOCK" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
   validate)         cmd_validate ;;
@@ -1948,12 +2269,12 @@ case "${1:-status}" in
   autoscale-daemon) autoscale_daemon ;;
   autoscale-tick)   autoscale_tick ;;
   autoscale-start)  autoscale_start ;;
-  autoscale-stop)   autoscale_stop ;;
+  autoscale-stop)   if [ "$FLEET_EXPLICIT" = 1 ]; then autoscale_stop; else for_each_fleet autoscale-stop; fi ;;
   autoscale-status) autoscale_status ;;
   imageupdate-daemon) imageupdate_daemon ;;
   imageupdate-tick)   imageupdate_tick ;;
   imageupdate-start)  imageupdate_start ;;
-  imageupdate-stop)   imageupdate_stop ;;
+  imageupdate-stop)   if [ "$FLEET_EXPLICIT" = 1 ]; then imageupdate_stop; else for_each_fleet imageupdate-stop; fi ;;
   imageupdate-status) imageupdate_status ;;
-  *) echo "usage: $0 {start|boot-autostart|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
+  *) echo "usage: $0 [--fleet <name>] {start|boot-autostart|fleets-json|fleet-create N|fleet-rename OLD NEW|fleet-delete N|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
 esac

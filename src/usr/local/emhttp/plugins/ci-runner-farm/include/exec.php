@@ -18,6 +18,28 @@ $CFGDIR  = "/boot/config/plugins/$PLUGIN";
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
 $action  = $_REQUEST['action'] ?? 'status-json';
 
+// Which fleet this request is for. Same regex the engine enforces — validate here too
+// so a crafted value can never reach a path or a shell argument. Fleet `default` is the
+// legacy install, so a request with no fleet param behaves exactly as it did before.
+const FLEET_NAME_RE = '/^[a-z][a-z0-9-]{0,30}$/';   // same shape the engine enforces
+$fleet = $_REQUEST['fleet'] ?? 'default';
+if (!preg_match(FLEET_NAME_RE, $fleet)) {
+  http_response_code(400);
+  echo json_encode(['ok' => false, 'error' => 'bad fleet']);
+  exit;
+}
+// Every invocation carries the fleet, so the engine never falls back to `default` by
+// accident. Kept as one pre-escaped prefix rather than repeated at 20 call sites.
+$CMD = escapeshellarg($SCRIPT) . ' --fleet ' . escapeshellarg($fleet);
+// Runner names are prefixed per fleet (engine: NAME_PREFIX). Keep this literal in sync
+// with the engine's default-fleet prefix — tests/config-parity.sh asserts it.
+$namePrefix = 'ci-runner';
+$nameRe = '/^' . preg_quote($fleet === 'default' ? $namePrefix : "$namePrefix-$fleet", '/') . '-[0-9]+$/';
+// The editable Dockerfile is per fleet, alongside that fleet's cfg.
+function dockerfile_path($cfgdir, $fleet) {
+  return $fleet === 'default' ? "$cfgdir/Dockerfile" : "$cfgdir/fleets/$fleet.Dockerfile";
+}
+
 function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [implode("\n", $out), $rc]; }
 // For actions whose stdout is a JSON body the frontend parses: keep stderr OUT of
 // it, so a stray docker/system warning can't corrupt the JSON (JSON.parse would
@@ -35,7 +57,7 @@ function last_json($out) {
 
 switch ($action) {
   case 'status-json':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' status-json');
+    [$out, $rc] = run_json($CMD . ' status-json');
     // runner-farm.sh already emits JSON; pass it through verbatim. Empty stdout means
     // the backend script itself failed (missing/non-executable/crash) — not a real
     // empty fleet — so on a non-zero exit surface an HTTP error, which makes crfPost
@@ -47,7 +69,7 @@ switch ($action) {
     break;
 
   case 'start': case 'stop': case 'restart': case 'validate':
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action));
+    [$out, $rc] = run($CMD . ' ' . escapeshellarg($action));
     echo json_encode(['ok' => $rc === 0, 'action' => $action, 'log' => $out]);
     break;
 
@@ -55,7 +77,7 @@ switch ($action) {
     // Clamp server-side too — the form max is presentation-only and the engine
     // hard-caps; this is defense-in-depth against a crafted POST (n=99999).
     $n = max(0, min(64, (int)($_REQUEST['n'] ?? 0)));
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' scale ' . escapeshellarg((string)$n));
+    [$out, $rc] = run($CMD . ' scale ' . escapeshellarg((string)$n));
     echo json_encode(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
     break;
 
@@ -95,7 +117,7 @@ switch ($action) {
     break;
 
   case 'get-dockerfile':
-    $df = "$CFGDIR/Dockerfile";
+    $df = dockerfile_path($CFGDIR, $fleet);
     if (!is_file($df)) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
     echo json_encode(['ok' => true, 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
@@ -103,34 +125,35 @@ switch ($action) {
   case 'save-dockerfile':
     $content = $_REQUEST['dockerfile'] ?? '';
     if (trim($content) === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
-    @mkdir($CFGDIR, 0755, true);
-    file_put_contents("$CFGDIR/Dockerfile", $content);
+    $df = dockerfile_path($CFGDIR, $fleet);
+    @mkdir(dirname($df), 0755, true);
+    file_put_contents($df, $content);
     echo json_encode(['ok' => true, 'action' => 'save-dockerfile']);
     break;
 
   case 'build-image':
     // The engine owns the flock/launch state machine (build-async verb); thin shim.
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' build-async');
+    [$out, $rc] = run_json($CMD . ' build-async');
     echo $out !== '' ? $out : json_encode(['ok'=>false,'error'=>'build launch failed']);
     break;
 
   case 'queued-json':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' queued-json');
+    [$out, $rc] = run_json($CMD . ' queued-json');
     echo $out !== '' ? $out : json_encode(['queued' => -1]);
     break;
 
   case 'stats-json':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' stats-json');
+    [$out, $rc] = run_json($CMD . ' stats-json');
     echo $out !== '' ? $out : json_encode(['total' => -1]);
     break;
 
   case 'cache-usage':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' cache-usage-json');
+    [$out, $rc] = run_json($CMD . ' cache-usage-json');
     echo $out !== '' ? $out : json_encode(['total' => -1]);
     break;
 
   case 'cache-clear':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' cache-clear-pkg');
+    [$out, $rc] = run_json($CMD . ' cache-clear-pkg');
     // cmd_cache_clear_pkg emits its {ok,error?} verdict as the final stdout line;
     // pass it through so a specific reason (unsafe root / could not remove N dirs)
     // reaches the UI, else fall back to the exit-code envelope.
@@ -140,8 +163,8 @@ switch ($action) {
 
   case 'recycle':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^ci-runner-[0-9]+$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' recycle ' . escapeshellarg($n));
+    if (!preg_match($nameRe, $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    [$out, $rc] = run_json($CMD . ' recycle ' . escapeshellarg($n));
     // cmd_recycle emits progress logs then its {ok,error?} verdict as the final
     // stdout line; pass it through so the specific reason (removed-not-recreated,
     // preflight-aborted, no-token …) reaches the UI, else fall back to exit code.
@@ -151,13 +174,13 @@ switch ($action) {
 
   case 'runner-log':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match('/^ci-runner-[0-9]+$/', $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
-    [$out, $rc] = run(escapeshellarg($SCRIPT) . ' logs-tail ' . escapeshellarg($n) . ' 150');
+    if (!preg_match($nameRe, $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    [$out, $rc] = run($CMD . ' logs-tail ' . escapeshellarg($n) . ' 150');
     echo json_encode(['ok' => true, 'log' => $out]);
     break;
 
   case 'image-info':
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' image-info-json');
+    [$out, $rc] = run_json($CMD . ' image-info-json');
     echo $out !== '' ? $out : json_encode(['exists' => false]);
     break;
 
@@ -168,14 +191,36 @@ switch ($action) {
 
   case 'farm-log':
     // engine owns the source selection + filtering (farm-log verb); thin shim.
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' farm-log');
+    [$out, $rc] = run_json($CMD . ' farm-log');
     echo $out !== '' ? $out : json_encode(['ok'=>true,'log'=>'']);
     break;
 
   case 'build-log':
     // engine owns the liveness/rc/log parsing (build-status verb); thin shim.
-    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' build-status');
+    [$out, $rc] = run_json($CMD . ' build-status');
     echo $out !== '' ? $out : json_encode(['ok'=>true,'running'=>false,'rc'=>null,'log'=>'']);
+    break;
+
+  case 'fleets-json':
+    // Fleet list is host-wide: no --fleet, so the engine fans out over every fleet.
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleets-json');
+    echo $out !== '' ? $out : json_encode(['fleets' => []]);
+    break;
+
+  case 'fleet-create': case 'fleet-delete':
+    $n = $_REQUEST['name'] ?? '';
+    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($n));
+    $j = last_json($out);
+    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => $action]);
+    break;
+
+  case 'fleet-rename':
+    $n = $_REQUEST['name'] ?? '';
+    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleet-rename ' . escapeshellarg($fleet) . ' ' . escapeshellarg($n));
+    $j = last_json($out);
+    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'fleet-rename']);
     break;
 
   default:
