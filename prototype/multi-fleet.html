@@ -1,0 +1,505 @@
+<!doctype html>
+<!--
+  THROWAWAY PROTOTYPE — issue #11 (scale-set fleet UI). Not shipped: lives outside
+  src/, so build-plg.sh never sees it. Delete or fold into the real .page files.
+
+  Three variants of the multi-fleet UI, switchable with ?variant=A|B|C (or the
+  floating bar at the bottom / arrow keys). Each variant answers the WHOLE issue
+  consistently across the three surfaces it touches — Fleet tab, Settings, and the
+  Main dashboard widget — because the answer to "selector or list or stacked"
+  decides the other two.
+
+    A  Selector    one fleet at a time, pill picker, today's layout scoped to it
+    B  Master rail fleet list on the left, detail + inline config on the right
+    C  Stacked     every fleet on screen at once, per-fleet cards, settings accordion
+
+  Fake data only. No backend, no mutations — buttons are dead. Runs standalone:
+      open prototype/multi-fleet.html
+  Theme toggle in the switcher bar because Unraid ships light and dark.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ci-runner-farm — multi-fleet UI prototype</title>
+<style>
+  /* Unraid webGUI theme variables (black/white themes), close enough to judge
+     against. The .crf-* rules below are copied from include/crf-core.php and
+     RunnerFarmFleet.page so the variants sit in the real visual language. */
+  :root{
+    --background-color:#1c1c1c;--text-color:#e2e2e2;--alt-text-color:#8f8f8f;
+    --border-color:#3a3a3a;--table-header-background-color:#252525;
+    --table-border-color:#333;--hover-table-row-background-color:#2a2a2a;
+    --shade-bg-color:#232323;--link-text-color:#29b6f6;--input-bg-color:#2b2b2b;
+    --brand-orange:#ff8c2f;--brand-red:#e22828;--disabled-text-color:#888;
+    --crf-ok:#4caf50;--crf-busy:var(--brand-orange);--crf-err:var(--brand-red);--crf-info:var(--link-text-color);
+  }
+  body.light{
+    --background-color:#f2f2f2;--text-color:#1c1c1c;--alt-text-color:#666;
+    --border-color:#d4d4d4;--table-header-background-color:#e8e8e8;
+    --table-border-color:#e0e0e0;--hover-table-row-background-color:#eaeaea;
+    --shade-bg-color:#fafafa;--input-bg-color:#fff;
+  }
+  body{background:var(--background-color);color:var(--text-color);font:14px/1.4 clear-sans,helvetica,arial,sans-serif;margin:0;padding:18px 22px 90px}
+  h2{font-size:17px;font-weight:500;margin:22px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--border-color)}
+  h2:first-of-type{margin-top:0}
+  .surface{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--alt-text-color)}
+  button,select,input{font:inherit;color:var(--text-color);background:var(--input-bg-color);border:1px solid var(--border-color);border-radius:6px;padding:4px 10px}
+  button{cursor:pointer;font-size:13px;padding:5px 12px;background:var(--shade-bg-color)}
+  button:hover{border-color:var(--link-text-color)}
+
+  /* --- from crf-core.php / RunnerFarmFleet.page --- */
+  .crf-muted{color:var(--alt-text-color)}
+  .crf-ball{width:12px;height:12px;border-radius:50%;background:var(--disabled-text-color);display:inline-block;flex:none}
+  .crf-ball-idle{background:var(--crf-ok)}
+  .crf-ball-busy{background:var(--crf-busy);animation:crf-pulse 1.6s ease-in-out infinite}
+  .crf-ball-error{background:var(--crf-err)}
+  @keyframes crf-pulse{50%{opacity:.35}}
+  .crf-banner{margin:6px 0 8px;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.4}
+  .crf-banner-warn{border:1px solid var(--crf-err);background:color-mix(in srgb,var(--crf-err) 12%,var(--background-color))}
+  .crf-banner-info{border:1px solid var(--crf-info);background:color-mix(in srgb,var(--crf-info) 10%,var(--background-color))}
+  .crf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:6px 0 8px}
+  .crf-stat{background:var(--shade-bg-color);border:1px solid var(--border-color);border-radius:6px;padding:10px 14px}
+  .crf-stat-label{font-size:12px;color:var(--alt-text-color);display:block}
+  .crf-stat-value{font-size:22px;font-weight:500;line-height:1.05;display:block}
+  .crf-stat-small{font-size:13px;display:block;margin-top:3px}
+  .crf-c-ok{color:var(--crf-ok)}.crf-c-busy{color:var(--crf-busy)}.crf-c-err{color:var(--crf-err)}
+  .crf-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px}
+  .crf-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--alt-text-color);font-size:13px}
+  .crf-scale input{width:4em}
+  .crf-bays{border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:0 0 8px}
+  .crf-bay{display:grid;grid-template-columns:22px minmax(110px,1fr) 88px minmax(120px,1.6fr) 120px;gap:8px;align-items:center;padding:5px 10px;border-top:1px solid var(--table-border-color)}
+  .crf-bay:first-child{border-top:none}
+  .crf-bay-head{background:var(--table-header-background-color);font-size:11px;color:var(--alt-text-color)}
+  .crf-name{font-family:bitstream,monospace;font-size:13px}
+  .crf-job{font-size:12px;color:var(--alt-text-color);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-badge{font-size:11px;border-radius:9px;padding:1px 8px;border:1px solid var(--border-color);color:var(--alt-text-color)}
+  .crf-badge.busy{color:var(--crf-busy);border-color:var(--crf-busy)}
+  .crf-badge.idle{color:var(--crf-ok);border-color:var(--crf-ok)}
+  .crf-badge.exited{opacity:.7}
+  .crf-ubar{display:inline-block;width:60px;height:6px;border-radius:3px;background:var(--border-color);overflow:hidden;vertical-align:middle}
+  .crf-ubar>span{display:block;height:100%;background:var(--crf-ok)}
+  .crf-ubar.mid>span{background:var(--crf-busy)}
+
+  /* --- prototype-only --- */
+  .mode-chip{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;border-radius:4px;padding:1px 6px;border:1px solid var(--border-color);color:var(--alt-text-color)}
+  .mode-chip.scaleset{color:var(--crf-info);border-color:var(--crf-info)}
+  .rowline{display:flex;align-items:center;gap:10px}
+  .grow{flex:1}
+  .cfg{border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color);padding:2px 12px 10px;margin:0 0 8px}
+  .cfg h4{font-size:13px;font-weight:500;margin:10px 0 6px}
+  .fld{display:flex;align-items:center;gap:10px;padding:3px 0}
+  .fld label{width:40%;min-width:120px;text-align:right;font-size:12px;color:var(--alt-text-color)}
+  .fld .val{flex:1;display:flex;align-items:center;gap:8px}
+  .fld input,.fld select{flex:1;max-width:320px;font-size:12px}
+  .fld.inherited input,.fld.inherited select{opacity:.5}
+  .tag{font-size:10.5px;color:var(--alt-text-color);border:1px dashed var(--border-color);border-radius:4px;padding:0 5px}
+  .tag.override{color:var(--crf-busy);border-color:var(--crf-busy);border-style:solid}
+  .locked{font-size:12px;color:var(--alt-text-color);font-style:italic}
+  .widget{width:300px;border:1px solid var(--border-color);border-radius:8px;padding:10px 12px;background:var(--shade-bg-color)}
+  .crfw-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}
+  .crfw-tile{border:1px solid var(--border-color);border-radius:8px;padding:6px;text-align:center}
+  .crfw-v{font-size:1.6rem;font-weight:600;line-height:1.1}
+  .crfw-l{font-size:.72rem;opacity:.72;text-transform:uppercase;letter-spacing:.04em}
+  .crfw-head{display:flex;align-items:center;gap:8px;font-size:.95rem;font-weight:600}
+  .crfw-foot{font-size:.78rem;opacity:.75;display:flex;gap:8px;align-items:flex-start}
+  .crfw-foot>span{flex:1;min-width:0}
+  .widget a{color:var(--link-text-color);text-decoration:none;white-space:nowrap}
+
+  /* switcher */
+  #sw{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:9999;display:flex;align-items:center;gap:2px;background:#111;color:#fff;border:1px solid #555;border-radius:999px;padding:4px 6px;box-shadow:0 6px 24px rgba(0,0,0,.5);font-size:13px}
+  #sw button{background:none;border:none;color:#fff;padding:4px 10px;border-radius:999px}
+  #sw button:hover{background:#333}
+  #sw .lab{padding:0 10px;white-space:nowrap;font-weight:600}
+  #sw .sep{width:1px;height:18px;background:#555;margin:0 4px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ------------------------------------------------------------------ fake data */
+const FLEETS = [
+  { id:'default', mode:'legacy', state:'running', up:4, busy:2, idle:2, queued:3,
+    configured:4, autoscale:'off', count:4, labels:'self-hosted,unraid,build', group:'',
+    ephemeral:'false', mem:'16g', cache:'41.2G' },
+  { id:'arm-builds', mode:'legacy', state:'stopped', up:0, busy:0, idle:0, queued:0,
+    configured:2, autoscale:'off', count:2, labels:'self-hosted,arm64', group:'',
+    ephemeral:'false', mem:'8g', cache:'2.1G' },
+  { id:'org-scaleset', mode:'scaleset', state:'running', up:5, busy:5, idle:0,
+    assigned:6, session:'connected', lastMsg:8, scaleSet:'unraid-x64', group:'Default',
+    labels:'from scale set', max:12, mem:'16g' },
+  { id:'heavy-gpu', mode:'scaleset', state:'running', up:1, busy:0, idle:1,
+    assigned:0, session:'stale', lastMsg:247, scaleSet:'gpu-builders', group:'restricted',
+    labels:'from scale set', max:4, mem:'48g' },
+  { id:'playwright', mode:'legacy', state:'running', up:8, busy:6, idle:2, queued:0,
+    configured:8, autoscale:'on · 2–16', count:8, labels:'self-hosted,unraid,e2e', group:'',
+    ephemeral:'true', mem:'8g', cache:'18.7G' },
+];
+
+const JOBS = ['build (ubuntu-latest)','e2e / chromium','lint','docker · publish','unit tests','typecheck'];
+function runners(f){
+  const out=[];
+  for(let i=1;i<=Math.max(f.up, f.mode==='legacy'?f.configured:f.up);i++){
+    const running=i<=f.up, busy=running && i<=f.busy;
+    out.push({
+      name:(f.mode==='scaleset'? f.scaleSet+'-'+(1000+i) : f.id+'-'+i),
+      phase: running ? (busy?'busy':'idle') : 'exited',
+      job: busy ? JOBS[(i+f.id.length)%JOBS.length] : (running?'waiting for jobs':'exited'),
+      cpu: busy ? 40+((i*23)%55) : (running?2:0),
+      el: busy ? (3+i*7)+'m' : '',
+    });
+  }
+  return out;
+}
+/* Which fleets are unhappy — the thing the dashboard has to resolve when fleets
+   disagree. Deliberately NOT "has queued jobs": a queue is normal operation, and
+   flagging it would make every busy fleet red. */
+function alerts(f){
+  const a=[], starved = f.mode==='scaleset' ? f.assigned-f.up : 0;
+  if(f.state==='stopped') a.push('stopped');
+  if(f.mode==='scaleset' && f.session==='stale') a.push('session stale — no message for '+Math.round(f.lastMsg/60)+'m');
+  if(starved>0) a.push(starved+' assigned job'+(starved>1?'s':'')+' with no runner');
+  return a;
+}
+const worst = f => alerts(f).length ? (f.state==='stopped'?'error':'busy') : 'idle';
+const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ball = f => `<span class="crf-ball crf-ball-${worst(f)==='error'?'error':worst(f)==='busy'?'busy':'idle'}"></span>`;
+const chip = f => `<span class="mode-chip ${f.mode}">${f.mode==='scaleset'?'scale set':'legacy'}</span>`;
+const age  = s => s<60 ? s+'s ago' : Math.round(s/60)+'m ago';
+const TOT = FLEETS.reduce((a,f)=>({
+  up:a.up+f.up, busy:a.busy+f.busy, idle:a.idle+f.idle,
+  waiting:a.waiting+(f.mode==='scaleset'?f.assigned:f.queued),
+}),{up:0,busy:0,idle:0,waiting:0});
+const SICK = FLEETS.filter(f=>alerts(f).length);
+
+function bays(f){
+  return `<div class="crf-bays">
+    <div class="crf-bay crf-bay-head"><span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span></div>
+    ${runners(f).map(r=>`<div class="crf-bay">
+      <span class="crf-ball ${r.phase==='exited'?'':'crf-ball-'+r.phase}"></span>
+      <span class="crf-name">${esc(r.name)}</span>
+      <span><span class="crf-badge ${r.phase}">${r.phase}</span></span>
+      <span class="crf-job">${esc(r.job)}${r.el?` · ${r.el}`:''}</span>
+      <span><span class="crf-ubar ${r.cpu>60?'mid':''}"><span style="width:${r.cpu}%"></span></span></span>
+    </div>`).join('')}
+  </div>`;
+}
+
+/* =================================================================== VARIANT A
+   Selector. One fleet at a time; the page below the picker is today's Fleet tab,
+   scoped. Settings stays its own tab, scoped to the same selection, with a mode
+   select at the top and mode-inapplicable fields HIDDEN (the existing crfImgSrc
+   hide-only pattern). Every fleet stores every key — no inheritance, so the
+   three-place defaults rule is untouched: defaults just seed each new fleet.
+   Dashboard: one aggregate tile set, fleet disagreement demoted to a footer line. */
+function VariantA(sel){
+  const f = FLEETS.find(x=>x.id===sel) || FLEETS[0];
+  const a = alerts(f);
+  return `
+  <div class="surface">Fleet tab</div>
+  <h2>Fleet</h2>
+  <div class="crf-toolbar" style="gap:4px">
+    ${FLEETS.map(x=>`<button onclick="pick('${x.id}')" style="${x.id===f.id?'border-color:var(--link-text-color);background:var(--hover-table-row-background-color)':''};display:flex;align-items:center;gap:7px">
+      ${ball(x)}${esc(x.id)} ${chip(x)}</button>`).join('')}
+    <button style="margin-left:auto;color:var(--alt-text-color)">+ Add fleet</button>
+  </div>
+
+  ${a.length?`<div class="crf-banner crf-banner-warn">⚠ ${esc(f.id)}: ${a.map(esc).join(' · ')}</div>`:''}
+
+  <div class="crf-stats">
+    <div class="crf-stat"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value">${f.up}</span></div>
+    <div class="crf-stat"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy">${f.busy}</span></div>
+    <div class="crf-stat"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok">${f.idle}</span></div>
+    ${f.mode==='scaleset' ? `
+      <div class="crf-stat"><span class="crf-stat-label">Assigned jobs</span><span class="crf-stat-value ${f.assigned>f.up?'crf-c-err':''}">${f.assigned}</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Session</span><span class="crf-stat-small ${f.session==='stale'?'crf-c-err':'crf-c-ok'}">${f.session}</span><span class="crf-stat-small crf-muted" style="font-size:11px">msg ${age(f.lastMsg)}</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Scale set</span><span class="crf-stat-small">${esc(f.scaleSet)}</span><span class="crf-stat-small crf-muted" style="font-size:11px">group ${esc(f.group)}</span></div>
+    ` : `
+      <div class="crf-stat"><span class="crf-stat-label">Queued</span><span class="crf-stat-value ${f.queued?'crf-c-busy':''}">${f.queued}</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small">${esc(f.autoscale)}</span></div>
+      <div class="crf-stat"><span class="crf-stat-label">Cache</span><span class="crf-stat-value">${esc(f.cache)}</span></div>
+    `}
+  </div>
+
+  <div class="crf-toolbar">
+    <button>Start</button><button>Stop</button><button>Restart</button><button>Validate</button>
+    ${f.mode==='legacy'
+      ? `<span class="crf-scale">Scale to <input type="number" value="${f.count}"><button>Scale</button></span>`
+      : `<span class="crf-scale">Max runners <input type="number" value="${f.max}"><button>Apply</button> <span class="locked">scale set decides the rest</span></span>`}
+  </div>
+  ${bays(f)}
+
+  <div class="surface" style="margin-top:26px">Settings tab</div>
+  <h2>Settings — ${esc(f.id)}</h2>
+  <div class="cfg">
+    <h4>Fleet</h4>
+    <div class="fld"><label>Mode</label><div class="val"><select><option ${f.mode==='legacy'?'selected':''}>legacy (registration token)</option><option ${f.mode==='scaleset'?'selected':''}>scale set (JIT)</option></select></div></div>
+    ${f.mode==='scaleset'?`
+      <div class="fld"><label>Scale set name</label><div class="val"><input value="${esc(f.scaleSet)}"></div></div>
+      <div class="fld"><label>Runner group</label><div class="val"><input value="${esc(f.group)}"></div></div>
+      <div class="fld"><label>Labels</label><div class="val"><input value="${esc(f.labels)}"><span class="tag">set on the scale set</span></div></div>
+      <div class="fld"><label>Max runners</label><div class="val"><input type="number" value="${f.max}"></div></div>
+    `:`
+      <div class="fld"><label>Runner group</label><div class="val"><input value="${esc(f.group)}" placeholder="(default)"></div></div>
+      <div class="fld"><label>Labels</label><div class="val"><input value="${esc(f.labels)}"></div></div>
+      <div class="fld"><label>Concurrent runners</label><div class="val"><input type="number" value="${f.count}"></div></div>
+      <div class="fld"><label>Ephemeral</label><div class="val"><select><option>${f.ephemeral}</option></select></div></div>
+    `}
+    <h4>Resources <span class="crf-muted" style="font-size:11px">— same in both modes</span></h4>
+    <div class="fld"><label>Memory per runner</label><div class="val"><input value="${esc(f.mem)}"></div></div>
+    <div class="fld"><label>Cache root</label><div class="val"><input value="/mnt/cache/github-runner/${esc(f.id)}"></div></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;padding:8px 0 2px"><button>Reset to defaults</button><button>Apply</button></div>
+  </div>
+  <p class="crf-muted" style="font-size:12px">Every fleet holds a full copy of every key — <code>default.cfg</code> only seeds a new fleet, so the three-place parity rule is unchanged.</p>
+
+  <div class="surface" style="margin-top:26px">Main dashboard widget</div>
+  <h2>Dashboard</h2>
+  <div class="widget">
+    <div class="crfw-head"><span class="crf-ball ${SICK.length?'crf-ball-error':'crf-ball-idle'}"></span>${TOT.up} runners up</div>
+    <div class="crfw-tiles">
+      <div class="crfw-tile"><div class="crfw-v">${TOT.up}</div><div class="crfw-l">Up</div></div>
+      <div class="crfw-tile"><div class="crfw-v crf-c-busy">${TOT.busy}</div><div class="crfw-l">Busy</div></div>
+      <div class="crfw-tile"><div class="crfw-v crf-c-ok">${TOT.idle}</div><div class="crfw-l">Idle</div></div>
+    </div>
+    <div class="crfw-foot"><span>${FLEETS.length} fleets${SICK.length?` · <span class="crf-c-err">${SICK.length} need attention</span>`:''}</span><a href="#" style="margin-left:auto">Manage ›</a></div>
+  </div>`;
+}
+
+/* =================================================================== VARIANT B
+   Master–detail. A permanent rail of every fleet with its own health line; the
+   detail pane holds actions, bays, AND the fleet's configuration inline — so the
+   Settings tab stops being per-fleet entirely and keeps only host-wide keys
+   (cache root, dashboard widget, image source). Per-fleet config shows ONLY keys
+   that override the defaults, with an explicit "add override" — defaults stay the
+   single source, one place, and the parity rule now has something to enforce.
+   Dashboard: no aggregate tiles at all; one line per fleet, because the aggregate
+   is exactly the number that lies when fleets disagree. */
+function VariantB(sel){
+  const f = FLEETS.find(x=>x.id===sel) || FLEETS[0];
+  const a = alerts(f);
+  const overrides = f.mode==='scaleset'
+    ? [['Scale set',f.scaleSet],['Runner group',f.group],['Max runners',f.max],['Memory per runner',f.mem]]
+    : [['Labels',f.labels],['Concurrent runners',f.count],['Memory per runner',f.mem]];
+  return `
+  <div class="surface">Fleet tab</div>
+  <h2>Fleet</h2>
+  <div style="display:flex;gap:14px;align-items:flex-start">
+    <div style="width:250px;flex:none;border:1px solid var(--border-color);border-radius:6px;overflow:hidden">
+      ${FLEETS.map(x=>`<div onclick="pick('${x.id}')" style="cursor:pointer;padding:8px 10px;border-top:1px solid var(--table-border-color);${x.id===f.id?'background:var(--hover-table-row-background-color);box-shadow:inset 3px 0 0 var(--link-text-color)':''}">
+        <div class="rowline">${ball(x)}<span class="crf-name grow">${esc(x.id)}</span>${chip(x)}</div>
+        <div class="crf-muted" style="font-size:11.5px;margin:3px 0 0 22px">
+          ${x.state==='stopped' ? 'stopped' :
+            x.mode==='scaleset' ? `${x.up} up · ${x.assigned} assigned` : `${x.up} up · ${x.busy} busy`}
+          ${alerts(x).length?` · <span class="crf-c-err">!</span>`:''}
+        </div>
+      </div>`).join('')}
+      <div style="padding:8px 10px;border-top:1px solid var(--table-border-color)"><button style="width:100%">+ Add fleet</button></div>
+    </div>
+
+    <div class="grow" style="min-width:0">
+      <div class="rowline" style="margin-bottom:8px">
+        <h2 style="border:none;margin:0;padding:0">${esc(f.id)}</h2>${chip(f)}
+        <span class="grow"></span>
+        <button>Start</button><button>Stop</button><button>Restart</button>
+      </div>
+      ${a.length?`<div class="crf-banner crf-banner-warn">⚠ ${a.map(esc).join(' · ')}</div>`:''}
+      <div class="rowline crf-muted" style="font-size:12.5px;gap:18px;margin-bottom:8px;flex-wrap:wrap">
+        <span><b class="crf-c-ok" style="font-size:15px">${f.up}</b> up</span>
+        <span><b class="crf-c-busy" style="font-size:15px">${f.busy}</b> busy</span>
+        ${f.mode==='scaleset'
+          ? `<span><b style="font-size:15px" class="${f.assigned>f.up?'crf-c-err':''}">${f.assigned}</b> assigned</span>
+             <span>session <b class="${f.session==='stale'?'crf-c-err':'crf-c-ok'}">${f.session}</b>, last message ${age(f.lastMsg)}</span>
+             <span>scale set <b>${esc(f.scaleSet)}</b> in <b>${esc(f.group)}</b></span>`
+          : `<span><b style="font-size:15px" class="${f.queued?'crf-c-busy':''}">${f.queued}</b> queued</span>
+             <span>autoscale <b>${esc(f.autoscale)}</b></span>
+             <span>cache <b>${esc(f.cache)}</b></span>`}
+        ${f.mode==='legacy'?`<span style="margin-left:auto">Scale to <input type="number" value="${f.count}" style="width:4em"> <button>Scale</button></span>`:''}
+      </div>
+      ${bays(f)}
+
+      <div class="cfg">
+        <div class="rowline" style="padding:8px 0 2px"><b style="font-size:13px">Configuration</b><span class="crf-muted" style="font-size:12px">${overrides.length} overrides · everything else inherits the defaults</span><span class="grow"></span><button>Edit</button></div>
+        ${overrides.map(([k,v])=>`<div class="fld"><label>${esc(k)}</label><div class="val"><span class="crf-name">${esc(v)}</span><span class="tag override">override</span></div></div>`).join('')}
+        <div class="fld"><label>Mode</label><div class="val"><span class="crf-name">${f.mode==='scaleset'?'scale set (JIT)':'legacy (registration token)'}</span><span class="tag override">override</span></div></div>
+        ${f.mode==='scaleset'?`<div class="fld"><label>Labels</label><div class="val"><span class="locked">defined on the scale set — not settable here</span></div></div>`:''}
+        <div style="padding:6px 0 2px"><button style="color:var(--alt-text-color)">+ Add override</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="surface" style="margin-top:26px">Settings tab</div>
+  <h2>Settings <span class="crf-muted" style="font-size:13px">— host-wide + fleet defaults</span></h2>
+  <div class="cfg" style="max-width:640px">
+    <h4>Host-wide</h4>
+    <div class="fld"><label>Cache root</label><div class="val"><input value="/mnt/cache/github-runner"></div></div>
+    <div class="fld"><label>Shared image cache</label><div class="val"><select><option>true (pull-through mirror)</option></select></div></div>
+    <div class="fld"><label>Dashboard widget</label><div class="val"><select><option>true</option></select></div></div>
+    <h4>Defaults for new fleets <span class="crf-muted" style="font-size:11px">— inherited until a fleet overrides</span></h4>
+    <div class="fld"><label>Mode</label><div class="val"><select><option>legacy (registration token)</option><option>scale set (JIT)</option></select></div></div>
+    <div class="fld"><label>Concurrent runners</label><div class="val"><input type="number" value="4"></div></div>
+    <div class="fld"><label>Labels</label><div class="val"><input value="self-hosted,unraid,build"><span class="tag">legacy only</span></div></div>
+    <div class="fld"><label>Memory per runner</label><div class="val"><input value="16g"></div></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;padding:8px 0 2px"><button>Apply</button></div>
+  </div>
+  <p class="crf-muted" style="font-size:12px">Fleets store only what differs. Mode-only keys stay visible here but carry a scope tag, so the defaults list — and the parity test against <code>default.cfg</code> — stays one flat list.</p>
+
+  <div class="surface" style="margin-top:26px">Main dashboard widget</div>
+  <h2>Dashboard</h2>
+  <div class="widget">
+    <div class="crfw-head"><span class="crf-ball ${SICK.length?'crf-ball-error':'crf-ball-idle'}"></span>${SICK.length} of ${FLEETS.length} fleets need attention</div>
+    <div style="margin:8px 0 6px">
+      ${FLEETS.map(x=>`<div class="rowline" style="padding:3px 0;font-size:.85rem">
+        ${ball(x)}<span class="grow crf-name" style="font-size:12px">${esc(x.id)}</span>
+        <span class="crf-muted" style="font-size:11.5px">${x.state==='stopped'?'stopped':
+          x.mode==='scaleset'?`${x.busy}/${x.up} busy · ${x.assigned} assigned`:`${x.busy}/${x.up} busy`}</span>
+      </div>`).join('')}
+    </div>
+    <div class="crfw-foot"><span>${TOT.up} runners up total</span><a href="#" style="margin-left:auto">Manage ›</a></div>
+  </div>`;
+}
+
+/* =================================================================== VARIANT C
+   Stacked. No selection at all — every fleet is a card, collapsed to a header
+   line until you open it. Scale-set cards render a different header (assigned /
+   session / last message, no scale box). Settings is one page with a Defaults
+   card followed by a per-fleet accordion: inherited values render greyed with an
+   "override" toggle, so the three-place rule holds on the defaults card and each
+   fleet is a sparse diff. Dashboard is a table — one row per fleet, aggregate at
+   the bottom, so disagreement is the default reading, not a footnote. */
+function VariantC(sel){
+  const open = sel;
+  return `
+  <div class="surface">Fleet tab</div>
+  <h2>Fleet <span class="crf-muted" style="font-size:13px">— ${FLEETS.length} fleets, ${TOT.up} runners up, ${TOT.busy} busy</span></h2>
+  ${FLEETS.some(x=>alerts(x).length)?`<div class="crf-banner crf-banner-warn">⚠ ${FLEETS.filter(x=>alerts(x).length).map(x=>esc(x.id)+': '+alerts(x).map(esc).join(', ')).join(' — ')}</div>`:''}
+
+  ${FLEETS.map(x=>{
+    const isOpen = x.id===open;
+    return `<div style="border:1px solid var(--border-color);border-radius:6px;margin:0 0 8px;overflow:hidden">
+      <div class="rowline" style="padding:8px 12px;background:var(--table-header-background-color);cursor:pointer" onclick="pick('${isOpen?'':x.id}')">
+        <span style="color:var(--alt-text-color);width:10px">${isOpen?'▾':'▸'}</span>
+        ${ball(x)}<span class="crf-name" style="font-size:14px">${esc(x.id)}</span>${chip(x)}
+        <span class="grow"></span>
+        <span class="crf-muted" style="font-size:12px;display:flex;gap:14px;align-items:center">
+          ${x.mode==='scaleset'
+            ? `<span><b class="${x.assigned>x.up?'crf-c-err':''}">${x.assigned}</b> assigned</span>
+               <span>session <b class="${x.session==='stale'?'crf-c-err':'crf-c-ok'}">${x.session}</b></span>
+               <span>msg ${age(x.lastMsg)}</span>`
+            : `<span><b class="${x.queued?'crf-c-busy':''}">${x.queued}</b> queued</span>
+               <span>autoscale ${esc(x.autoscale)}</span>`}
+          <span><b class="crf-c-busy">${x.busy}</b>/<b>${x.up}</b> busy</span>
+        </span>
+        <button onclick="event.stopPropagation()">Start</button>
+        <button onclick="event.stopPropagation()">Stop</button>
+      </div>
+      ${isOpen?`<div style="padding:8px 12px">
+        ${x.mode==='scaleset'
+          ? `<div class="rowline crf-muted" style="font-size:12px;gap:16px;margin-bottom:8px">
+               <span>scale set <b>${esc(x.scaleSet)}</b></span><span>group <b>${esc(x.group)}</b></span>
+               <span>labels <b>${esc(x.labels)}</b></span><span>max <b>${x.max}</b></span>
+               <span style="margin-left:auto">Max runners <input type="number" value="${x.max}" style="width:4em"> <button>Apply</button></span>
+             </div>`
+          : `<div class="rowline crf-muted" style="font-size:12px;gap:16px;margin-bottom:8px">
+               <span>labels <b>${esc(x.labels)}</b></span><span>cache <b>${esc(x.cache)}</b></span>
+               <span style="margin-left:auto">Scale to <input type="number" value="${x.count}" style="width:4em"> <button>Scale</button></span>
+             </div>`}
+        ${bays(x)}
+      </div>`:''}
+    </div>`;
+  }).join('')}
+  <button>+ Add fleet</button>
+
+  <div class="surface" style="margin-top:26px">Settings tab</div>
+  <h2>Settings</h2>
+  <div class="cfg" style="max-width:700px;border-color:var(--link-text-color)">
+    <h4>Defaults <span class="crf-muted" style="font-size:11px">— every fleet inherits these unless it overrides</span></h4>
+    <div class="fld"><label>Mode</label><div class="val"><select><option>legacy (registration token)</option><option>scale set (JIT)</option></select></div></div>
+    <div class="fld"><label>Concurrent runners</label><div class="val"><input type="number" value="4"></div></div>
+    <div class="fld"><label>Labels</label><div class="val"><input value="self-hosted,unraid,build"><span class="tag">legacy only</span></div></div>
+    <div class="fld"><label>Runner group</label><div class="val"><input placeholder="(default)"><span class="tag">legacy only</span></div></div>
+    <div class="fld"><label>Memory per runner</label><div class="val"><input value="16g"></div></div>
+    <div class="fld"><label>Cache root</label><div class="val"><input value="/mnt/cache/github-runner"></div></div>
+  </div>
+  ${FLEETS.map(x=>{
+    const isOpen = x.id===open;
+    const ov = x.mode==='scaleset' ? {'Memory per runner':x.mem} : {'Labels':x.labels,'Concurrent runners':x.count,'Memory per runner':x.mem};
+    return `<div class="cfg" style="padding-top:0">
+      <div class="rowline" style="padding:9px 0 5px;cursor:pointer" onclick="pick('${isOpen?'':x.id}')">
+        <span style="color:var(--alt-text-color);width:10px">${isOpen?'▾':'▸'}</span>
+        <b style="font-size:13px">${esc(x.id)}</b>${chip(x)}
+        <span class="crf-muted" style="font-size:12px">${Object.keys(ov).length+1} overrides</span>
+      </div>
+      ${isOpen?`
+        <div class="fld"><label>Mode</label><div class="val"><select><option ${x.mode==='legacy'?'selected':''}>legacy (registration token)</option><option ${x.mode==='scaleset'?'selected':''}>scale set (JIT)</option></select><span class="tag override">override</span></div></div>
+        ${x.mode==='scaleset'?`
+          <div class="fld"><label>Scale set name</label><div class="val"><input value="${esc(x.scaleSet)}"><span class="tag override">override</span></div></div>
+          <div class="fld"><label>Runner group</label><div class="val"><input value="${esc(x.group)}"><span class="tag override">override</span></div></div>
+          <div class="fld"><label>Labels</label><div class="val"><input value="${esc(x.labels)}" disabled><span class="locked">from the scale set</span></div></div>
+          <div class="fld"><label>Concurrent runners</label><div class="val"><input value="${x.max}" disabled><span class="locked">scale set max</span></div></div>
+        `:`
+          <div class="fld"><label>Labels</label><div class="val"><input value="${esc(x.labels)}"><span class="tag override">override</span></div></div>
+          <div class="fld"><label>Runner group</label><div class="val inherited"><input placeholder="(default)"><span class="tag">inherited</span></div></div>
+          <div class="fld"><label>Concurrent runners</label><div class="val"><input type="number" value="${x.count}"><span class="tag override">override</span></div></div>
+        `}
+        <div class="fld"><label>Memory per runner</label><div class="val"><input value="${esc(x.mem)}"><span class="tag override">override</span></div></div>
+        <div class="fld inherited"><label>Cache root</label><div class="val"><input value="/mnt/cache/github-runner" disabled><span class="tag">inherited</span></div></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding:6px 0 4px"><button>Revert to defaults</button><button>Apply</button></div>
+      `:''}
+    </div>`;
+  }).join('')}
+
+  <div class="surface" style="margin-top:26px">Main dashboard widget</div>
+  <h2>Dashboard</h2>
+  <div class="widget" style="width:340px">
+    <div class="crfw-head"><span class="crf-ball ${SICK.length?'crf-ball-error':'crf-ball-idle'}"></span>CI Runner Farm</div>
+    <table style="width:100%;border-collapse:collapse;margin:8px 0;font-size:.8rem">
+      <tr style="color:var(--alt-text-color);font-size:.7rem;text-transform:uppercase"><th style="text-align:left;font-weight:400">Fleet</th><th style="font-weight:400">Up</th><th style="font-weight:400">Busy</th><th style="font-weight:400">Queue</th></tr>
+      ${FLEETS.map(x=>`<tr style="border-top:1px solid var(--table-border-color)">
+        <td style="padding:3px 0"><span class="rowline" style="gap:6px">${ball(x)}<span class="crf-name" style="font-size:11.5px">${esc(x.id)}</span></span></td>
+        <td style="text-align:center">${x.up}</td>
+        <td style="text-align:center" class="${x.busy?'crf-c-busy':''}">${x.busy}</td>
+        <td style="text-align:center" class="${(x.mode==='scaleset'?x.assigned:x.queued)?'crf-c-busy':''}">${x.mode==='scaleset'?x.assigned:x.queued}</td>
+      </tr>`).join('')}
+      <tr style="border-top:1px solid var(--border-color);font-weight:600"><td style="padding:3px 0">All</td><td style="text-align:center">${TOT.up}</td><td style="text-align:center">${TOT.busy}</td><td style="text-align:center">${TOT.waiting}</td></tr>
+    </table>
+    <div class="crfw-foot"><span class="crf-c-err">${SICK.map(x=>esc(x.id)+': '+esc(alerts(x)[0])).join(' · ')||'all fleets healthy'}</span><a href="#" style="margin-left:auto">Manage ›</a></div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------- switcher */
+const VARIANTS = {A:['Selector',VariantA], B:['Master rail',VariantB], C:['Stacked cards',VariantC]};
+const qs = new URLSearchParams(location.search);
+const v  = (qs.get('variant')||'A').toUpperCase();
+const cur = VARIANTS[v] ? v : 'A';
+const sel = qs.get('fleet') || (cur==='C' ? 'org-scaleset' : 'default');
+
+/* file:// has a null origin, so history.pushState throws — just set location. */
+function go(variant, fleet){
+  const p = new URLSearchParams({variant, fleet, theme: qs.get('theme')||'dark'});
+  location.search = '?'+p.toString();
+}
+function pick(id){ go(cur, id); }
+function cycle(d){
+  const ks = Object.keys(VARIANTS);
+  go(ks[(ks.indexOf(cur)+d+ks.length)%ks.length], sel);
+}
+if((qs.get('theme')||'dark')==='light') document.body.classList.add('light');
+
+document.getElementById('app').innerHTML = VARIANTS[cur][1](sel);
+document.body.insertAdjacentHTML('beforeend', `
+  <div id="sw">
+    <button onclick="cycle(-1)" aria-label="previous variant">←</button>
+    <span class="lab">${cur} · ${VARIANTS[cur][0]}</span>
+    <button onclick="cycle(1)" aria-label="next variant">→</button>
+    <span class="sep"></span>
+    <button onclick="(function(){const p=new URLSearchParams(location.search);p.set('theme',(p.get('theme')||'dark')==='dark'?'light':'dark');location.search='?'+p.toString();})()">${(qs.get('theme')||'dark')==='dark'?'☀':'☾'}</button>
+  </div>`);
+
+addEventListener('keydown', e=>{
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if(e.key==='ArrowLeft') cycle(-1);
+  if(e.key==='ArrowRight') cycle(1);
+});
+</script>
+</body>
+</html>
