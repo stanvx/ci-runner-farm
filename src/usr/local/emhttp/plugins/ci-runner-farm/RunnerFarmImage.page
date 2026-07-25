@@ -184,6 +184,26 @@ let crfiAce=null, crfiSaved='';
    re-measure when the Runner image sub-tab (tab2) is shown. */
 document.getElementById('tab2') && document.getElementById('tab2').addEventListener('click',()=>{ setTimeout(()=>{ if(crfiAce) crfiAce.resize(true); },60); });
 crfiSyncTC();
+/* The editable Dockerfile is PER FLEET, but this page's initial contents are
+   rendered server-side from the default fleet's path. Without this, selecting
+   another fleet on the Fleet tab would leave the editor showing default's
+   Dockerfile while Save wrote it over the selected fleet's — silent data loss with
+   no visible symptom. Re-load whenever the selection is not default, and whenever
+   it changes (crfSetFleet dispatches crf-fleet-change). */
+function crfiLoadDf(){
+  crfPost({action:'get-dockerfile'}).then(d=>{
+    if(typeof d.dockerfile!=='string') return;
+    const dirty=document.getElementById('crfi-dirty');
+    if(dirty&&dirty.classList.contains('on')) crfToast('Unsaved Dockerfile changes discarded — they belonged to the previous fleet');
+    crfiSet(d.dockerfile); crfiSaved=d.dockerfile;
+    if(dirty) dirty.classList.remove('on');
+    const p=document.getElementById('crfi-df-path');
+    if(p&&d.path) p.textContent=d.path+(d.saved?'':' (shipped default — not saved yet)');
+    crfiSyncTC();
+  }).catch(e=>{ console.error('ci-runner-farm get-dockerfile:',e); });
+}
+if(crfFleet()!=='default') crfiLoadDf();
+document.addEventListener('crf-fleet-change',crfiLoadDf);
 function crfiResetDf(){
   crfPost({action:'get-default-dockerfile'}).then(d=>{
     if(!d.dockerfile) return;

@@ -118,8 +118,11 @@ switch ($action) {
 
   case 'get-dockerfile':
     $df = dockerfile_path($CFGDIR, $fleet);
-    if (!is_file($df)) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
-    echo json_encode(['ok' => true, 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
+    // `saved` distinguishes this fleet's own Dockerfile from the shipped default the
+    // editor falls back to, so the client can label the path it would actually write.
+    $saved = is_file($df);
+    if (!$saved) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
+    echo json_encode(['ok' => true, 'saved' => $saved, 'path' => dockerfile_path($CFGDIR, $fleet), 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
 
   case 'save-dockerfile':
