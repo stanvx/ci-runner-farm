@@ -84,8 +84,26 @@ window.CRF_UUI = (async () => {
     return true;
   } catch (e) { console.warn('ci-runner-farm: @unraid/ui unavailable, using fallback styling', e); return false; }
 })();
+/* Which fleet every request on this page is about.
+   One install can host several named fleets; exec.php takes a `fleet` param on
+   every action and falls back to `default` when it is absent. That fallback is
+   why the selection is injected HERE rather than threaded through each call
+   site: a single missed call would silently operate on the wrong fleet, and
+   stopping the wrong fleet has no visible symptom until someone notices their
+   runners are gone. One choke point, no per-call-site discipline required.
+   Persisted per browser (not on flash) — it is a view preference, not config. */
+const CRF_FLEET_KEY = 'crf.fleet';
+window.CRF_FLEET = (() => { try { return localStorage.getItem(CRF_FLEET_KEY) || 'default'; } catch(e) { return 'default'; } })();
+function crfFleet(){ return window.CRF_FLEET || 'default'; }
+function crfSetFleet(name){
+  window.CRF_FLEET = name || 'default';
+  try { localStorage.setItem(CRF_FLEET_KEY, window.CRF_FLEET); } catch(e) {}
+  document.dispatchEvent(new CustomEvent('crf-fleet-change', {detail:{fleet:window.CRF_FLEET}}));
+}
 function crfPost(p){
   p.csrf_token = CRF_CSRF;
+  // Explicit fleet wins (fleets-json and the fleet verbs name their own target).
+  if(p.fleet===undefined) p.fleet = crfFleet();
   return fetch(CRF_URL,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:Object.entries(p).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&')})
     .then(r=>r.text().then(t=>{

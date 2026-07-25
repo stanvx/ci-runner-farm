@@ -10,9 +10,37 @@ Tag="server"
    order. Only Fleet-specific pollers, rendering, and styles live in this file. */
 ?>
 <?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
+<div class="crf-shell">
+<!-- Fleet NAVIGATION. Hidden entirely on a single-fleet install, so an install that
+     never creates a second fleet reads exactly as it did before multi-fleet landed. -->
+<nav class="crf-rail" id="crf-rail" hidden aria-label="Fleets">
+  <div class="crf-rail-h">Fleets</div>
+  <div id="crf-rail-body"></div>
+</nav>
+<section class="crf-main">
 <div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
 <div id="crf-warn" class="crf-banner crf-banner-warn" style="display:none"></div>
 <div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
+<div id="crf-drain" class="crf-banner crf-banner-info" style="display:none"></div>
+
+<!-- OPERATIONAL STATUS: identity, then one primary action chosen by state with the
+     consequential ones behind the overflow. -->
+<div class="crf-id">
+  <div class="crf-id-grow">
+    <h1 class="crf-title" id="crf-id-name">default</h1>
+    <div class="crf-statusline" id="crf-id-status"><span class="crf-ball"></span> <span class="crf-muted">loading…</span></div>
+  </div>
+  <div class="crf-id-actions">
+    <uui-button size="sm" id="crf-primary" onclick="crfPrimary()">Start fleet</uui-button>
+    <div class="crf-menu">
+      <uui-button variant="secondary" size="sm" id="crf-menu-btn" aria-haspopup="true" aria-expanded="false" onclick="crfMenuToggle()">More</uui-button>
+      <div class="crf-menu-list" id="crf-menu" hidden role="menu">
+        <span role="menuitem" tabindex="0" onclick="crfMenuPick('restart')">Restart fleet</span>
+        <span role="menuitem" tabindex="0" onclick="crfMenuPick('validate')">Run preflight validation</span>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="crf-stats" id="crf-stats">
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
@@ -24,11 +52,9 @@ Tag="server"
   <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Cache</span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></div></uui-card-wrapper>
 </div>
 
+<!-- Start/Stop/Restart/Validate moved into the identity header's primary action and
+     overflow; only the scale control stays inline with the runner bays it changes. -->
 <div class="crf-toolbar">
-  <uui-button size="xs" onclick="crfAction('start')">Start</uui-button>
-  <uui-button variant="secondary" size="xs" onclick="crfAction('stop')">Stop</uui-button>
-  <uui-button variant="secondary" size="xs" onclick="crfAction('restart')">Restart</uui-button>
-  <uui-button variant="outline" size="xs" onclick="crfAction('validate')">Validate (no token)</uui-button>
   <span class="crf-scale">Scale to <input type="number" id="crf-n" min="0" max="20" value="4">
   <uui-button variant="secondary" size="xs" onclick="crfScale()">Scale</uui-button></span>
 </div>
@@ -56,6 +82,8 @@ Tag="server"
   </div>
   <div id="crf-log" class="crf-console-body"><span class="crf-muted">Output from fleet actions and image builds appears here.</span></div>
 </div>
+</section>
+</div>
 
 <style>
   /* Shared .crf-* tokens/rules (:root vars, .crf-muted, banners, balls, toast,
@@ -64,6 +92,40 @@ Tag="server"
      here — a duplicate later in document order would win the cascade and silently
      mask edits to the shared source. Only Fleet-specific selectors belong below. */
   .crf-right{text-align:right}
+  /* Health colours. Colour carries HEALTH ONLY — mode is a badge with no colour of
+     its own, so "legacy" never reads as a warning. */
+  .crf-h-healthy{background:var(--crf-ok)}
+  .crf-h-active{background:var(--crf-info)}
+  .crf-h-degraded{background:var(--crf-busy)}
+  .crf-h-failed{background:var(--crf-err)}
+  .crf-h-stopped{background:var(--disabled-text-color,#888)}
+  .crf-shell{display:flex;align-items:flex-start;gap:14px}
+  .crf-main{flex:1;min-width:0}
+  .crf-rail{flex:0 0 190px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:6px 0 8px}
+  .crf-rail[hidden]{display:none}
+  .crf-rail-h{background:var(--table-header-background-color);font-size:11px;color:var(--alt-text-color);padding:5px 10px;letter-spacing:.03em}
+  .crf-rail-row{display:grid;grid-template-columns:12px 1fr;gap:8px;align-items:center;padding:6px 10px;border-top:1px solid var(--table-border-color,var(--border-color));cursor:pointer}
+  .crf-rail-row:hover{background:var(--hover-table-row-background-color)}
+  .crf-rail-row.on{background:var(--shade-bg-color,var(--table-header-background-color))}
+  .crf-rail-row:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px}
+  .crf-rail-n{font-size:13px;color:var(--text-color);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-rail-sub{grid-column:2;font-size:11px;color:var(--alt-text-color)}
+  .crf-id{display:flex;align-items:flex-start;gap:12px;margin:6px 0 10px}
+  .crf-id-grow{flex:1;min-width:0}
+  .crf-title{font-size:20px;font-weight:500;line-height:1.2;margin:0;color:var(--text-color)}
+  .crf-statusline{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:13px;color:var(--text-color);margin-top:3px}
+  .crf-sep{color:var(--alt-text-color)}
+  .crf-id-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
+  .crf-menu{position:relative}
+  .crf-menu-list{position:absolute;right:0;top:calc(100% + 4px);z-index:20;min-width:200px;background:var(--background-color);border:1px solid var(--border-color);border-radius:6px;padding:4px;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+  .crf-menu-list[hidden]{display:none}
+  .crf-menu-list span{display:block;padding:6px 10px;font-size:13px;color:var(--text-color);border-radius:4px;cursor:pointer}
+  .crf-menu-list span:hover{background:var(--hover-table-row-background-color)}
+  .crf-menu-list span:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px}
+  @media (max-width:860px){
+    .crf-shell{flex-direction:column}
+    .crf-rail{flex:1 1 auto;width:100%;box-sizing:border-box}
+  }
   .crf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:6px 0 8px}
   .crf-stat-inner{display:flex;flex-direction:column;gap:2px;padding:0}
   uui-card-wrapper.crf-stat:not(:defined){background:var(--shade-bg-color,var(--table-header-background-color));border:1px solid var(--border-color);border-radius:6px;display:block;padding:10px 14px}
@@ -136,7 +198,7 @@ function crfFarmLog(){
 crfFarmLog(); setInterval(crfFarmLog,10000);
 /* Lightweight theme-following toast for action feedback. */
 const CRF_TOAST_MSG={start:'Fleet started',stop:'Fleet stopped',restart:'Fleet restarted',validate:'Validation finished'};
-function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
+function crfDoAction(a){ crfPost({action:a}).then(o=>{crfLog(o); crfRefresh(); crfFleetList(); if(o.ok!==false) crfToast(CRF_TOAST_MSG[a]||a); else crfToast((CRF_TOAST_MSG[a]||a)+' failed'+(o.error?': '+o.error:'')); }).catch(e=>{ crfToast((CRF_TOAST_MSG[a]||a)+' failed'); console.error('ci-runner-farm '+a+':',e); }); }
 function crfAction(a){
   /* Stop/Restart kill whatever the runners are building — confirm with the
      live impact when any runner is mid-job (sweetalert ships with the webgui). */
@@ -154,6 +216,111 @@ function crfAction(a){
   crfDoAction(a);
 }
 function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({action:'scale',n}).then(o=>{crfLog(o); crfRefresh(); if(o.ok!==false) crfToast('Scaled to '+n); else crfToast('Scale failed'+(o.error?': '+o.error:''));}).catch(e=>{ crfToast('Scale failed'); console.error('ci-runner-farm scale:',e); }); }
+
+/* ---- fleet navigation ---------------------------------------------------
+   The rail, the identity header and the state-chosen primary action. The
+   selected fleet itself lives in crf-core.php (crfFleet/crfSetFleet), which
+   also stamps it onto every crfPost — nothing here threads it by hand. */
+window.CRF_FLEETS=[];
+const CRF_HEALTH_LABEL={healthy:'Healthy',active:'Handing over',degraded:'Degraded',failed:'Failed',stopped:'Stopped'};
+/* Colour means health only. `active` (blue) is a fleet mid-handover: it is doing
+   something deliberate, not something wrong, so it must not read as degraded. */
+function crfHealth(f){
+  if(f.draining_to) return 'active';
+  const run=+f.running||0, cfg=+f.configured||0;
+  if(run===0) return 'stopped';
+  return run<cfg ? 'degraded' : 'healthy';
+}
+function crfRailRow(f){
+  const h=crfHealth(f), on=f.name===crfFleet();
+  return '<div class="crf-rail-row'+(on?' on':'')+'" tabindex="0" role="button" aria-current="'+(on?'true':'false')+'" data-fleet="'+crfEsc(f.name)+'">'+
+    '<span class="crf-ball crf-h-'+h+'" title="'+CRF_HEALTH_LABEL[h]+'"></span>'+
+    '<span class="crf-rail-n">'+crfEsc(f.name)+'</span>'+
+    '<span class="crf-rail-sub">'+(+f.running||0)+'/'+(+f.configured||0)+(f.draining_to?' · → '+crfEsc(f.draining_to):'')+'</span>'+
+  '</div>';
+}
+function crfRenderRail(){
+  const rail=document.getElementById('crf-rail'), body=document.getElementById('crf-rail-body');
+  if(!rail||!body) return;
+  // One fleet means no navigation to do — an install that never adds a second
+  // fleet sees the page exactly as it was before any of this existed.
+  rail.hidden = window.CRF_FLEETS.length < 2;
+  body.innerHTML = window.CRF_FLEETS.map(crfRailRow).join('');
+}
+function crfRenderIdentity(){
+  const f=window.CRF_FLEETS.find(x=>x.name===crfFleet())||{name:crfFleet(),running:0,configured:0,mode:'legacy'};
+  const h=crfHealth(f), cfg=+f.configured||0;
+  const nm=document.getElementById('crf-id-name'); if(nm) nm.textContent=f.name;
+  const st=document.getElementById('crf-id-status');
+  if(st) st.innerHTML='<span class="crf-ball crf-h-'+h+'"></span><b>'+CRF_HEALTH_LABEL[h]+'</b>'+
+    '<span class="crf-sep">·</span><span>'+(+f.running||0)+' of '+cfg+' runner'+(cfg===1?'':'s')+'</span>'+
+    '<span class="crf-sep">·</span><span class="crf-muted">'+(f.mode==='scaleset'?'Scale set':'Legacy registration')+'</span>';
+  const dr=document.getElementById('crf-drain');
+  if(dr){
+    if(f.draining_to){ dr.textContent='⟳ '+f.name+' is being renamed to '+f.draining_to+' — runners move across as they go idle, and '+f.name+' disappears once its last one is gone.'; dr.style.display='block'; }
+    else { dr.textContent=''; dr.style.display='none'; }
+  }
+  const p=document.getElementById('crf-primary');
+  if(p){
+    // Mid-handover the engine refuses to refill this fleet (cmd_start resumes the
+    // drain instead), so offering Start here would be a button that does nothing.
+    if(f.draining_to){ p.textContent='Handing over…'; p.setAttribute('disabled',''); }
+    else { p.removeAttribute('disabled'); p.textContent=(+f.running||0)===0?'Start fleet':'Stop fleet'; }
+  }
+}
+function crfPrimary(){
+  const f=window.CRF_FLEETS.find(x=>x.name===crfFleet())||{};
+  if(f.draining_to) return;
+  crfAction((+f.running||0)===0?'start':'stop');
+}
+function crfMenuOpen(v){
+  const m=document.getElementById('crf-menu'), b=document.getElementById('crf-menu-btn');
+  if(!m) return;
+  m.hidden=!v;
+  if(b) b.setAttribute('aria-expanded', v?'true':'false');
+}
+function crfMenuToggle(){ const m=document.getElementById('crf-menu'); if(m) crfMenuOpen(m.hidden); }
+function crfMenuPick(a){ crfMenuOpen(false); crfAction(a); }
+document.addEventListener('click',e=>{ if(!e.target.closest('.crf-menu')) crfMenuOpen(false); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') crfMenuOpen(false); });
+
+function crfSelectFleet(name){
+  if(!name||name===crfFleet()) return;
+  crfSetFleet(name);
+  // Every cache on this page belongs to the fleet we just left — the runner rows,
+  // the open log drawer, the cache figure and the action log. Drop them all rather
+  // than showing another fleet's numbers under this fleet's name for one poll.
+  window.CRF_LAST=null; window.CRF_CACHE=null;
+  window.CRF_DRAWER=null; window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true;
+  crfUserLog=false;
+  const tb=document.getElementById('crf-bays-body');
+  if(tb){ tb.__crfSig=null; tb.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div>'; }
+  crfRenderRail(); crfRenderIdentity();
+  crfRefresh(); crfQueued(); crfCacheUsage(); crfStats(); crfFarmLog();
+}
+document.getElementById('crf-rail-body').addEventListener('click',e=>{
+  const row=e.target.closest('.crf-rail-row[data-fleet]'); if(row) crfSelectFleet(row.dataset.fleet);
+});
+document.getElementById('crf-rail-body').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ') return;
+  const row=e.target.closest('.crf-rail-row[data-fleet]'); if(!row) return;
+  e.preventDefault(); crfSelectFleet(row.dataset.fleet);
+});
+/* fleets-json is host-wide, so it names its own target rather than inheriting the
+   selection. It fans out one engine re-exec per fleet, hence 30s — the 5s status
+   poll stays single-fleet, so poll cost does not grow with the number of fleets. */
+function crfFleetList(){
+  if(!crfFleetActive()) return;
+  crfPost({action:'fleets-json',fleet:'default'}).then(d=>{
+    window.CRF_FLEETS=d.fleets||[];
+    // A fleet remembered in localStorage may have been renamed or deleted since. The
+    // engine resolves an unknown --fleet to an absent cfg and silently runs on
+    // defaults, so fall back to a real fleet instead of operating on a ghost.
+    if(window.CRF_FLEETS.length && !window.CRF_FLEETS.some(f=>f.name===crfFleet())) crfSelectFleet(window.CRF_FLEETS[0].name);
+    crfRenderRail(); crfRenderIdentity();
+  }).catch(()=>{});
+}
+crfFleetList(); setInterval(crfFleetList,30000);
 
 function crfElapsed(iso){
   const t=Date.parse(iso); if(isNaN(t)) return null;
@@ -204,6 +371,11 @@ function crfRefresh(){
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
     put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
+    // The identity header shows this fleet's health, and status-json is 6x fresher
+    // than the fleet list — fold the live counts in so the header can't sit on a
+    // stale "Stopped" for half a minute after a Start.
+    const me=window.CRF_FLEETS.find(x=>x.name===crfFleet());
+    if(me){ me.running=up; me.configured=d.configured??me.configured; crfRenderIdentity(); crfRenderRail(); }
     put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the
@@ -405,12 +577,12 @@ document.getElementById('crf-bays-body').addEventListener('keydown',e=>{
    stats + per-runner exec on the NAS); refresh immediately on return. */
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden) return;
-  crfRefresh(); crfQueued(); crfFarmLog(); crfCacheUsage(); crfStats();
+  crfRefresh(); crfQueued(); crfFarmLog(); crfCacheUsage(); crfStats(); crfFleetList();
   if(window.CRF_DRAWER) crfDrawerFill(window.CRF_DRAWER);
 });
 /* Switching to the Fleet dynamix sub-tab doesn't fire visibilitychange; refresh
    on its tab button so the paused pollers catch up immediately, not in 5s. */
 document.getElementById('tab1') && document.getElementById('tab1').addEventListener('click',()=>{
-  setTimeout(()=>{ crfRefresh(); crfQueued(); crfFarmLog(); crfCacheUsage(); crfStats(); },60);
+  setTimeout(()=>{ crfRefresh(); crfQueued(); crfFarmLog(); crfCacheUsage(); crfStats(); crfFleetList(); },60);
 });
 </script>
