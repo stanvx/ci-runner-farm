@@ -216,6 +216,14 @@ cache root, one pull-through mirror and one registry login serve the whole box.
 Verbs invoked without `--fleet` that are box-level (`boot-autostart`,
 `autoscale-stop`, `imageupdate-stop`, `dashboard-json`) fan out over every fleet.
 
+`fleet-rename` on an empty fleet is instant. On a fleet with live runners it
+hands over instead: both fleets exist while runners move across one at a time,
+each old runner retired only once it goes idle, so no job is killed and no
+runner is ever left labelled with a fleet that has no config. The old fleet's
+config is removed only when its last runner is gone; until then it is a normal
+fleet you can stop, inspect and see in `fleets-json` (as `draining_to`). A
+handover interrupted by a reboot resumes on the next start.
+
 ---
 
 ## Releases & versioning

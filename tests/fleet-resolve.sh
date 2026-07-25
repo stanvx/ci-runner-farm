@@ -136,6 +136,66 @@ fw_case "ci-runner-farm:build" "" "2"
 # but never fleet build's row 2.
 fw_case "ci-runner-farm:default" "ci-runner-farm" "1 3"
 
+# --- 5. rename handover -----------------------------------------------------
+# The invariant worth a test: a rename of a fleet that still owns containers must
+# leave the OLD cfg on flash. Move it instead and every running runner is labelled
+# with a fleet that has no config — invisible to autoscale, stop and status until the
+# drain finishes. Revert cmd_fleet_rename's `cp` to a `mv` and the first check fails.
+cat > "$tmpd/bin/nohup" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmpd/bin/nohup"
+# Stub docker: container count per fleet comes from $tmpd/containers.<fleet>.
+cat > "$tmpd/bin/docker" <<EOF
+#!/usr/bin/env bash
+f=""
+for a in "\$@"; do case "\$a" in label=net.unraid.ci-runner-farm.fleet=*) f="\${a##*=}" ;; esac; done
+n=\$(cat "$tmpd/containers.\$f" 2>/dev/null || echo 0)
+# Counted loop, not \`seq 1 \$n\`: BSD seq counts DOWN for \`seq 1 0\` and would report
+# two containers for an empty fleet, silently flipping which rename path is tested.
+i=0; while [ "\$i" -lt "\${n:-0}" ]; do i=\$((i+1)); echo "ci-runner-\$f-\$i"; done
+EOF
+chmod +x "$tmpd/bin/docker"
+# shellcheck disable=SC1090
+# json_escape is a one-liner, so it needs a single-line match — a /^}/ range on it would
+# run to EOF and source the engine's whole dispatch.
+. <(sed -n '/^json_escape()/p;/^drain_target()/,/^}/p;/^fleet_container_count()/,/^}/p;/^cmd_fleet_rename()/,/^}/p' "$ENGINE")
+MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
+FLEET_LABEL="net.unraid.ci-runner-farm.fleet"
+FARM_LOG="$tmpd/farm.log"
+log() { :; }
+
+rename_fixture() { # <fleet> <container count>
+  rm -rf "$FLEETDIR"; mkdir -p "$FLEETDIR"
+  printf 'RUNNER_COUNT="3"\n' > "$FLEETDIR/$1.cfg"
+  printf '%s\n' "$2" > "$tmpd/containers.$1"
+  printf '0\n' > "$tmpd/containers.new-name"
+}
+
+# Empty fleet: the fast path still moves, so nothing lingers on flash.
+rename_fixture build 0
+cmd_fleet_rename build new-name >/dev/null
+is "empty rename removes the old cfg"  ""      "$([ -f "$FLEETDIR/build.cfg" ] && echo present)"
+is "empty rename creates the new cfg"  present "$([ -f "$FLEETDIR/new-name.cfg" ] && echo present)"
+is "empty rename leaves no drain mark" ""      "$(drain_target build)"
+
+# Live fleet: both cfgs exist, and the old one is marked as handing over.
+rename_fixture build 2
+out="$(cmd_fleet_rename build new-name)"
+is "live rename keeps the old cfg"     present "$([ -f "$FLEETDIR/build.cfg" ] && echo present)"
+is "live rename creates the new cfg"   present "$([ -f "$FLEETDIR/new-name.cfg" ] && echo present)"
+is "live rename records the target"    new-name "$(drain_target build)"
+case "$out" in *'"draining":true'*) ok ;; *) no "live rename should report draining: $out" ;; esac
+
+# A fleet already handing over cannot be renamed again — two drains would fight over
+# the same containers with different targets.
+case "$(cmd_fleet_rename build other-name)" in *'"ok":false'*) ok ;; *) no "a second rename of a draining fleet should be refused" ;; esac
+is "refused rename creates nothing" "" "$([ -f "$FLEETDIR/other-name.cfg" ] && echo present)"
+
+# default is never a rename source, so it never reports a drain target.
+is "default never drains" "" "$(drain_target default)"
+
 if [ "$fail" -ne 0 ]; then
   echo "fleet-resolve: FAILED ($fail failed, $pass passed)" >&2
   exit 1
