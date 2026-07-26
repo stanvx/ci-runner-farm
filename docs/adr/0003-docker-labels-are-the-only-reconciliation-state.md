@@ -36,5 +36,21 @@ restarts containers in place when Docker returns: a restarted JIT runner holds a
 assignment that has long since timed out, so it would idle forever while
 occupying a capacity slot.
 
+## Amendment: half the diff is currently unreachable
+
+Implementation (#22) found that `github.com/actions/scaleset` v0.4.0 exposes no
+list-runners call — only `GetRunnerByName`. The intersection this decision
+describes is therefore only computable in one direction. A GitHub record can be
+removed when its container is still present to name it, because the container
+label carries the runner name; a record whose container has vanished entirely
+cannot be enumerated and so cannot be reconciled at all.
+
+This does not change the decision. Labels remain the only state we keep, and
+adding a store would not help: the orphan is on the GitHub side, so no local
+record makes it enumerable. It does mean the "GitHub records with no matching
+container are deregistered" clause above overstates what the library permits
+today, and orphaned records accumulate until the API grows a list call or we
+drop to the REST runners endpoint the legacy path already uses.
+
 Resolves part of #10, and supplies the scale-set replacement for legacy runner
 deregistration that #5 identified as necessary.

@@ -44,6 +44,13 @@ jobs:
           token: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN || github.token }}
           fetch-depth: 0
 
+      # build-plg.sh compiles the scale-set listener to stamp its MD5 into the .plg.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
       - name: Prepare plugin release metadata
         shell: bash
         env:
@@ -91,6 +98,13 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
+      # Needed to rebuild the scale-set listener asset from the tag.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
       - name: Upload plugin release artifact
         env:
           GH_TOKEN: ${{ secrets.UNRAID_BOT_GITHUB_ADMIN_TOKEN || github.token }}
@@ -109,4 +123,13 @@ jobs:
           tgz_md5="$(md5sum ci-runner-farm.tgz | cut -d' ' -f1)"
           [[ "$plg_md5" == "$tgz_md5" ]] || { echo "::error::rebuilt package md5 ($tgz_md5) != committed .plg packageMD5 ($plg_md5)" >&2; exit 1; }
           cp ci-runner-farm.tgz "$asset"
-          gh release upload "$RELEASE_TAG" ci-runner-farm.plg "$asset" --clobber
+          # Second asset, same reproducible-rebuild contract: the listener the
+          # .plg fetches by URL and verifies against its daemonMD5 entity.
+          ./build-plg.sh --daemon-only
+          bin_asset="$(sed -n 's/^<!ENTITY daemonName[[:space:]]*"\([^"]*\)">$/\1/p' ci-runner-farm.plg)"
+          [[ -n "$bin_asset" ]] || { echo "::error::daemonName entity missing in .plg" >&2; exit 1; }
+          plg_bin_md5="$(sed -n 's/^<!ENTITY daemonMD5[[:space:]]*"\([0-9a-f]*\)">$/\1/p' ci-runner-farm.plg)"
+          bin_md5="$(md5sum crf-scalesetd | cut -d' ' -f1)"
+          [[ "$plg_bin_md5" == "$bin_md5" ]] || { echo "::error::rebuilt daemon md5 ($bin_md5) != committed .plg daemonMD5 ($plg_bin_md5)" >&2; exit 1; }
+          cp crf-scalesetd "$bin_asset"
+          gh release upload "$RELEASE_TAG" ci-runner-farm.plg "$asset" "$bin_asset" --clobber

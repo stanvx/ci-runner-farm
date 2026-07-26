@@ -29,6 +29,13 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # Needed to rebuild the scale-set listener the .plg pins by MD5.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
       - name: Validate plugin metadata
         shell: bash
         env:
@@ -96,4 +103,15 @@ jobs:
             exit 1
           fi
 
-          echo "Validated $plg + $tgz for $tag (version $plg_version, package md5 $tgz_md5)"
+          # Same proof for the second release asset: rebuild the listener from the
+          # tagged daemon/ and require the MD5 the committed .plg advertises, so
+          # publish cannot upload a binary the installer will then reject.
+          ./build-plg.sh --daemon-only
+          plg_bin_md5="$(sed -n 's/^<!ENTITY daemonMD5[[:space:]]*"\([0-9a-f]*\)">$/\1/p' "$plg")"
+          bin_md5="$(md5sum crf-scalesetd | cut -d' ' -f1)"
+          if [[ -z "$plg_bin_md5" || "$plg_bin_md5" != "$bin_md5" ]]; then
+            echo "daemonMD5 in $plg ($plg_bin_md5) does not match rebuilt crf-scalesetd ($bin_md5) at $tag" >&2
+            exit 1
+          fi
+
+          echo "Validated $plg + $tgz + crf-scalesetd for $tag (version $plg_version, package md5 $tgz_md5, daemon md5 $bin_md5)"

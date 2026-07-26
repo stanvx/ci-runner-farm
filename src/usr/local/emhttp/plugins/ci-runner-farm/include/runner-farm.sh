@@ -16,6 +16,9 @@
 #   validate         dry-provision one container (no GitHub token needed) to
 #                    prove mounts/limits/image on this box, then remove it
 #   prune-cache      clear the shared cache root
+#
+# Plus the provisioning verbs crf-scalesetd calls on a scale-set fleet (config-json,
+# jit-start, jit-remove, jit-list, sweep) — see the boundary section below.
 ###############################################################################
 set -uo pipefail
 
@@ -29,6 +32,12 @@ CFG="${CFGDIR}/${PLUGIN}.cfg"
 FLEETDIR="${CFGDIR}/fleets"
 TOKEN_FILE="${CFGDIR}/token"
 REGISTRY_TOKEN_FILE="${CFGDIR}/registry-token"
+# Named credential sets (see credential_facts). All mode 0600, all on flash beside the
+# legacy token — never in a .cfg, which the web form rewrites and the UI renders back.
+CREDDIR="${CFGDIR}/credentials"
+# The scale-set listener. NOT in the plugin tarball (src/ is text-only and the tgz must
+# stay byte-reproducible): the .plg fetches it as its own release asset and drops it here.
+SCALESETD="/usr/local/emhttp/plugins/${PLUGIN}/bin/crf-scalesetd"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
 FLEET_LABEL="net.unraid.ci-runner-farm.fleet"
 
@@ -135,8 +144,19 @@ IMAGE_DRAIN_TIMEOUT="3600"           # max seconds to wait for a busy runner to 
 # shellcheck disable=SC2034  # consumed only by RunnerFarmDashboard.page's Cond, never inside this script
 DASHBOARD_WIDGET_ENABLE="true"       # show the Main->Dashboard status tile (read only by RunnerFarmDashboard.page's Cond)
 # ---- fleet ------------------------------------------------------------------
-FLEET_MODE="legacy"                  # legacy = registration-token runners (the only mode today).
-                                     # Reserved for scale-set fleets; nothing reads it yet.
+FLEET_MODE="legacy"                  # legacy   = registration-token runners this script provisions.
+                                     # scale-set = a GitHub runner scale set; crf-scalesetd listens
+                                     # for job assignments and calls jit-start per assigned job.
+SCALESET_NAME=""                     # scale set name workflows target with `runs-on:`. Empty means
+                                     # not configured — a scale-set fleet refuses to start without it
+                                     # rather than silently creating a set nobody routes work to.
+SCALESET_DRAIN_TIMEOUT="600"         # seconds Stop waits for in-flight jobs before force-removing the
+                                     # runners. Deliberately far shorter than IMAGE_DRAIN_TIMEOUT: that
+                                     # one waits for a job so a runner can be recreated on a new image,
+                                     # while this one is holding up an operator's Stop.  0 = no wait.
+GH_CREDENTIAL="default"              # NAME of a credential set under credentials/, never a secret. The
+                                     # literal "default" resolves to the legacy chmod-600 token file, so
+                                     # an upgraded install keeps working without writing anything.
 # ----------------------------------------------------------------------------
 
 # Allowlist of keys the settings page may set, split into the two layers a fleet is
@@ -152,7 +172,7 @@ RUN_AS_ROOT CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
 NETWORK_ISOLATION RUNNER_NETWORK AUTOSCALE AUTOSCALE_MIN \
 AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL \
 AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT \
-FLEET_MODE"
+FLEET_MODE SCALESET_NAME SCALESET_DRAIN_TIMEOUT GH_CREDENTIAL"
 
 # Read one cfg file WITHOUT sourcing it (the file is written by the web form, so
 # sourcing would execute anything a crafted value smuggled in). Parse KEY="value"
@@ -206,8 +226,11 @@ FW_TAG="${FW_TAG}:${FLEET}"
 # finds the state it left behind.
 AUTOSCALE_PID="${RUNDIR}/autoscale${FSFX}.pid"
 IMAGEUPDATE_PID="${RUNDIR}/imageupdate${FSFX}.pid"
+SCALESET_PID="${RUNDIR}/scaleset${FSFX}.pid"
 AUTOSCALE_STATE="${RUNDIR}/autoscale${FSFX}.state"
-FARM_LOG="${RUNDIR}/autoscale${FSFX}.log"        # autoscale + reconcile log; farm-log tails it
+# autoscale + reconcile log, and now also the scale-set listener's — it appends here so
+# the existing farm-log tail (and the UI panel reading it) shows the daemon with no change.
+FARM_LOG="${RUNDIR}/autoscale${FSFX}.log"
 IMAGEUPDATE_LOG="${RUNDIR}/imageupdate${FSFX}.log"
 FLEET_LOCK="${RUNDIR}/fleet${FSFX}.lock"
 HOST_LOCK="${RUNDIR}/host.lock"                  # deliberately NOT per-fleet — see with_host_lock
@@ -224,6 +247,11 @@ SECURITY_TTL="300"                               # UI's 5s status poll never ham
 
 log()  { echo "[ci-runner-farm] $*"; }
 err()  { echo "[ci-runner-farm] ERROR: $*" >&2; }
+# The whole error contract the scale-set listener reads off the provisioning verbs:
+# 0 = done, 75 = retry with backoff (contended fleet lock, or capacity full — normal
+# back-pressure, NOT a fault), 1 = hard failure, stop provisioning and report the fleet
+# unhealthy. 75 is EX_TEMPFAIL. Anything richer would need the daemon to parse our text.
+EX_TEMPFAIL=75
 host() { hostname -s; }
 
 # Managed containers belonging to the CURRENT fleet. A managed container with no
@@ -283,6 +311,7 @@ crf_confgen() {
     "$DIND" "$SHARE_DOCKER_SOCK" "$RUN_AS_ROOT" "$IMAGE_SOURCE" "$IMAGE" \
     "$REGISTRY_SERVER" "$REGISTRY_USERNAME" "$SHARED_IMAGE_CACHE" "$MIRROR_PORT" \
     "$NETWORK_ISOLATION" "$RUNNER_NETWORK" "$CACHE_ROOT" \
+    "$FLEET_MODE" "$SCALESET_NAME" \
     | sha256sum | cut -c1-12
 }
 # The config fingerprint a running runner was created with ('' for runners created before
@@ -291,6 +320,11 @@ runner_confgen() { docker inspect -f '{{ index .Config.Labels "net.unraid.ci-run
 # How many RUNNING runners predate the current baked config (drives the drain loop and the
 # UI "migrating" indicator).
 count_stale_runners() {
+  # A scale-set fleet never migrates: a JIT runner runs exactly one job and exits, so
+  # GitHub's next assignment replaces it on the current config by itself. Reporting one
+  # as stale would spin the Apply drain for IMAGE_DRAIN_TIMEOUT trying to recycle a
+  # runner that cannot be recreated (its JIT config is single-use).
+  [ "$FLEET_MODE" = "scale-set" ] && { echo 0; return 0; }
   local cur c n=0; cur="$(crf_confgen)"
   for c in $(managed_running_names); do
     [ -n "$c" ] || continue
@@ -407,7 +441,10 @@ autoscale_daemon() {
   # runs) and (b) every UI start/stop/scale/recycle would block 20s then fail "fleet
   # busy". Closing fd 8 here releases the inherited lock; with_fleet_lock reopens it
   # fresh per tick. (7/9 closed too, defensively, for any future locked spawn path.)
-  exec 8>&- 7>&- 9>&- 6>&- 2>/dev/null || true
+  # Grouped so the 2>/dev/null lasts only for the closes: `exec` with redirections and no
+  # command applies them permanently, which would silence every err() this daemon writes
+  # to its own log for the rest of its life.
+  { exec 8>&- 7>&- 9>&- 6>&-; } 2>/dev/null || true
   log "autoscale daemon up (min=$AUTOSCALE_MIN max=$AUTOSCALE_MAX buffer=$AUTOSCALE_MIN_IDLE step=$AUTOSCALE_STEP every ${AUTOSCALE_INTERVAL}s)"
   while true; do
     load_cfg
@@ -436,6 +473,77 @@ autoscale_stop() {
 autoscale_status() {
   if [ -f "$AUTOSCALE_PID" ] && kill -0 "$(cat "$AUTOSCALE_PID" 2>/dev/null)" 2>/dev/null; then
     echo "running (pid $(cat "$AUTOSCALE_PID"))"
+  else echo "stopped"; fi
+}
+
+# ---- scale-set listener ----------------------------------------------------
+# One crf-scalesetd per scale-set fleet. Supervision is deliberately IDENTICAL to the
+# autoscale daemon's — same pidfile-on-tmpfs, same fleet-scoped pkill, same log file —
+# so there is exactly one supervision shape in this plugin to reason about.
+#
+# There is NO watchdog: nothing here restarts a dead listener. A supervisor that
+# silently respawns a crashlooping daemon turns a visible fault into an invisible one
+# (jobs just queue forever); the UI reports the listener as stopped instead, and the
+# daemon owns its own reconnect backoff for the transient failures that deserve one.
+scaleset_start() {
+  [ "$FLEET_MODE" = "scale-set" ] || return 0
+  # An empty name would have the listener create/attach to a set no `runs-on:` targets,
+  # so every job would queue forever with a healthy-looking fleet. Refuse instead.
+  [ -n "$SCALESET_NAME" ] || { err "fleet $FLEET is in scale-set mode but no scale set name is configured — set it on the Fleet tab"; return 1; }
+  [ -x "$SCALESETD" ] || { err "scale-set listener missing at $SCALESETD (it ships as a separate release asset) — reinstall the plugin"; return 1; }
+  scaleset_stop
+  # sh -c wrapper for one reason: this is nohup'd from cmd_start, which runs under
+  # `with_fleet_lock wait` with fd 8 flock HELD, and the listener would inherit that
+  # locked fd for its whole life — so every later UI start/stop would block 20s then
+  # fail "fleet busy", and its own jit-start calls could never take the lock. The bash
+  # daemons close these fds in their own function body (see autoscale_daemon); a Go
+  # binary cannot, so we close them before exec'ing it.
+  # The closes are wrapped in a { } group carrying its OWN 2>/dev/null: `exec` with
+  # redirections and no command applies them PERMANENTLY to the shell, so a bare
+  # `exec ... 2>/dev/null` would survive into the exec'd Go binary and send every slog
+  # line to /dev/null. With no watchdog (see above), that log IS the fault report the UI
+  # shows — the group scopes the redirect to the closes and the listener inherits FARM_LOG.
+  nohup sh -c '{ exec 8>&- 7>&- 9>&- 6>&-; } 2>/dev/null || true; exec "$0" run --fleet "$1"' \
+    "$SCALESETD" "$FLEET" >>"$FARM_LOG" 2>&1 &
+  echo $! > "$SCALESET_PID"
+  log "scale-set listener started (pid $(cat "$SCALESET_PID"), scale set '$SCALESET_NAME')"
+}
+# $1=force skips the listener's drain (SIGKILL): the Docker-stopping hook uses it
+# because the host is tearing Docker down and will terminate the runners regardless,
+# so waiting SCALESET_DRAIN_TIMEOUT for jobs that are about to die anyway only delays
+# the shutdown. A plain stop sends SIGTERM and lets in-flight jobs finish.
+scaleset_stop() {
+  local sig=""; [ "${1:-}" = force ] && sig="-KILL"
+  # Fleet-scoped AND anchored at end of cmdline. Without the trailing $ this is a prefix
+  # match, and fleet names are ^[a-z][a-z0-9-]{0,30}$ — so stopping fleet `dev` would also
+  # kill the listeners of `dev2` and `dev-web`. (autoscale_stop gets away without an anchor
+  # only because "autoscale-daemon" follows the name and anchors it.)
+  local pat="crf-scalesetd run --fleet ${FLEET}\$"
+  # shellcheck disable=SC2086  # $sig is deliberately empty (= default SIGTERM) or -KILL
+  [ -f "$SCALESET_PID" ] && kill $sig "$(cat "$SCALESET_PID")" 2>/dev/null
+  rm -f "$SCALESET_PID"
+  # shellcheck disable=SC2086
+  pkill $sig -f "$pat" 2>/dev/null || true
+  [ -n "$sig" ] && return 0                   # force already SIGKILLed — nothing left to drain
+  # SIGTERM only STARTS the listener's drain: it keeps its GitHub session and its
+  # containers for up to SCALESET_DRAIN_TIMEOUT. Returning now would let cmd_start spawn a
+  # second listener onto the same scale set, and the still-draining one would force-remove
+  # the containers the new one had just provisioned. Wait it out, bounded, then SIGKILL —
+  # a wedged listener must not block Start forever either.
+  local waited=0 limit=$(( ${SCALESET_DRAIN_TIMEOUT:-600} + 30 ))
+  while pgrep -f "$pat" >/dev/null 2>&1; do
+    if [ "$waited" -ge "$limit" ]; then
+      err "scale-set listener for fleet $FLEET still alive ${limit}s after SIGTERM — killing it"
+      pkill -KILL -f "$pat" 2>/dev/null || true
+      break
+    fi
+    sleep 1; waited=$((waited+1))
+  done
+  return 0
+}
+scaleset_status() {
+  if [ -f "$SCALESET_PID" ] && kill -0 "$(cat "$SCALESET_PID" 2>/dev/null)" 2>/dev/null; then
+    echo "running (pid $(cat "$SCALESET_PID"))"
   else echo "stopped"; fi
 }
 
@@ -533,7 +641,7 @@ imageupdate_tick() {
 
 # long-running loop; re-reads config each tick so UI changes apply live
 imageupdate_daemon() {
-  exec 8>&- 7>&- 9>&- 6>&- 2>/dev/null || true   # disown inherited lock fds (see autoscale_daemon)
+  { exec 8>&- 7>&- 9>&- 6>&-; } 2>/dev/null || true   # disown inherited lock fds (see autoscale_daemon)
   log "image-update daemon up (every ${IMAGE_AUTOUPDATE_INTERVAL}s, drain-timeout ${IMAGE_DRAIN_TIMEOUT}s)"
   while true; do
     load_cfg
@@ -1028,19 +1136,27 @@ build_args() {
     --label "${FLEET_LABEL}=${FLEET}"
     --label "net.unraid.ci-runner-farm.index=${idx}"
     --label "net.unraid.ci-runner-farm.confgen=$(crf_confgen)"
-    -e RUNNER_NAME="$(host)-${name}"
-    -e LABELS="$RUNNER_LABELS"
-    -e DISABLE_AUTO_UPDATE="true"
-    -e DISABLE_AUTOMATIC_DEREGISTRATION="true"   # we deregister host-side (deregister_runner_api)
     -e RUN_AS_ROOT="$RUN_AS_ROOT"
     -e RUNNER_ALLOW_RUNASROOT="1"
     -e RUNNER_WORKDIR="/_work"
     -e npm_config_cache="/home/runner/.npm"
   )
-  # myoung34 entrypoints enable ephemeral mode when the EPHEMERAL env var is
-  # PRESENT (any value, including "false") — so only pass it when it is true,
-  # otherwise EPHEMERAL="false" silently produces one-job-then-exit runners.
-  [ "$EPHEMERAL" = "true" ] && ARGS+=( -e EPHEMERAL="true" )
+  # Everything the myoung34 ENTRYPOINT reads (name, labels, scope, deregistration) is
+  # dead in scale-set mode, because the scale-set tail below replaces that entrypoint:
+  # the identity, labels and group all come from the JIT config GitHub minted, and a
+  # stale env copy of them here could only ever contradict it.
+  if [ "$FLEET_MODE" != "scale-set" ]; then
+    ARGS+=(
+      -e RUNNER_NAME="$(host)-${name}"
+      -e LABELS="$RUNNER_LABELS"
+      -e DISABLE_AUTO_UPDATE="true"
+      -e DISABLE_AUTOMATIC_DEREGISTRATION="true"   # we deregister host-side (deregister_runner_api)
+    )
+    # myoung34 entrypoints enable ephemeral mode when the EPHEMERAL env var is
+    # PRESENT (any value, including "false") — so only pass it when it is true,
+    # otherwise EPHEMERAL="false" silently produces one-job-then-exit runners.
+    [ "$EPHEMERAL" = "true" ] && ARGS+=( -e EPHEMERAL="true" )
+  fi
   # warm caches mounted into the runner, configurable via CACHE_MOUNTS
   local m
   for m in $CACHE_MOUNTS; do
@@ -1085,23 +1201,44 @@ build_args() {
     mkdir -p "$CACHE_ROOT/work/$name"
     ARGS+=( -v "$CACHE_ROOT/work/$name:/_work" )
   fi
-  local scope_target=""
-  if [ "$GH_SCOPE" = "org" ]; then
-    ARGS+=( -e RUNNER_SCOPE="org" -e ORG_NAME="$GH_OWNER" )
-    [ -n "$RUNNER_GROUP" ] && ARGS+=( -e RUNNER_GROUP="$RUNNER_GROUP" )
-    scope_target="org:$GH_OWNER"
+  # ---- how this runner obtains its identity: the ONE branch that differs by fleet
+  # mode. Everything above — cpus, memory, isolated network, DinD, cache mounts, the
+  # /_work tmpfs, labels, --restart=no — is identical in both, so this stays one
+  # function: a second build_args_jit is exactly where a future setting gets added to
+  # one mode and silently missed in the other (the same drift crf_confgen warns about).
+  if [ "$FLEET_MODE" = "scale-set" ]; then
+    # The blob decodes to the runner's own RSA PRIVATE KEY, so it is passed by PATH and
+    # bind-mounted read-only — never as an env var, which any job step could read back
+    # out of its own /proc or the container's .Config.Env. cmd_jit_start unlinks the
+    # host file the moment `docker run` returns; the mount keeps the inode alive.
+    # Guarded so the paths that build a runner WITHOUT one (recycle, validate) fail
+    # loudly here rather than starting a container that would idle unregistered.
+    [ -n "${JITCONFIG_FILE:-}" ] || { err "a scale-set runner can only be created from a JIT config (jit-start), not recycled or hand-started"; return 1; }
+    ARGS+=(
+      --label "net.unraid.ci-runner-farm.gh-runner-name=${GH_RUNNER_NAME:-}"
+      -v "${JITCONFIG_FILE}:${JITCONFIG_FILE}:ro"
+      -e CRF_JITCONFIG_FILE="$JITCONFIG_FILE"
+      --entrypoint /usr/local/bin/jit-entrypoint.sh
+    )
   else
-    local repo; repo="$(repo_for_index "$idx")"
-    ARGS+=( -e RUNNER_SCOPE="repo" -e REPO_URL="https://github.com/${repo}" )
-    scope_target="repo:$repo"
-  fi
-  # Hand the container a short-lived registration token, never the PAT (see the
-  # host-side token helpers above). Skipped when no PAT is configured — e.g. the
-  # 'validate' path, which swaps the entrypoint for a sleep and never registers.
-  if [ -n "$ACCESS_TOKEN" ] && [ "${NO_REGISTER:-0}" != "1" ]; then
-    local reg; reg="$(registration_token "$scope_target")"
-    [ -z "$reg" ] && { err "could not mint a runner registration token for ${scope_target#*:} (check the PAT's scope/permissions)"; return 1; }
-    ARGS+=( -e RUNNER_TOKEN="$reg" )
+    local scope_target=""
+    if [ "$GH_SCOPE" = "org" ]; then
+      ARGS+=( -e RUNNER_SCOPE="org" -e ORG_NAME="$GH_OWNER" )
+      [ -n "$RUNNER_GROUP" ] && ARGS+=( -e RUNNER_GROUP="$RUNNER_GROUP" )
+      scope_target="org:$GH_OWNER"
+    else
+      local repo; repo="$(repo_for_index "$idx")"
+      ARGS+=( -e RUNNER_SCOPE="repo" -e REPO_URL="https://github.com/${repo}" )
+      scope_target="repo:$repo"
+    fi
+    # Hand the container a short-lived registration token, never the PAT (see the
+    # host-side token helpers above). Skipped when no PAT is configured — e.g. the
+    # 'validate' path, which swaps the entrypoint for a sleep and never registers.
+    if [ -n "$ACCESS_TOKEN" ] && [ "${NO_REGISTER:-0}" != "1" ]; then
+      local reg; reg="$(registration_token "$scope_target")"
+      [ -z "$reg" ] && { err "could not mint a runner registration token for ${scope_target#*:} (check the PAT's scope/permissions)"; return 1; }
+      ARGS+=( -e RUNNER_TOKEN="$reg" )
+    fi
   fi
   ARGS+=( "$(effective_image)" )
 }
@@ -1199,10 +1336,16 @@ _provision_firewall() {
 # commands block briefly. Mode "try": daemon ticks take it non-blocking and simply
 # skip a contended tick (retried next interval), so a stuck UI action can never
 # deadlock the daemons. Runs the command in a subshell that holds fd 8 for its duration.
+# Mode "jit": same 20s wait as "wait", but a timeout exits 75 instead of 1. The scale-set
+# listener has to tell "the operator is mid-Stop, try again in a moment" apart from "this
+# fleet is broken, stop provisioning" — and it only ever gets the exit code. Deliberately
+# a THIRD mode rather than a change to "wait": every UI caller treats 1 as the failure.
 with_fleet_lock() {
   local mode="$1"; shift
   if [ "$mode" = try ]; then
     ( flock -n 8 || exit 0; "$@" ) 8>"$FLEET_LOCK"
+  elif [ "$mode" = jit ]; then
+    ( flock -w 20 8 || { err "fleet busy (a start/stop/scale/recycle is running) — retrying"; exit "$EX_TEMPFAIL"; }; "$@" ) 8>"$FLEET_LOCK"
   else
     ( flock -w 20 8 || { err "fleet busy (another start/stop/scale/recycle or a daemon tick is running) — try again"; exit 1; }; "$@" ) 8>"$FLEET_LOCK"
   fi
@@ -1235,6 +1378,9 @@ host_fleet_usage() {
 }
 # HARD_MAX bounds one fleet; HOST_MAX bounds the box. Without it N fleets each under
 # their own cap can still exhaust the host. Call under with_host_lock.
+# HARD_MAX is global because jit-start needs the same ceiling cmd_scale enforces — a
+# second literal is how the manual path and the daemon path end up disagreeing.
+HARD_MAX=64
 HOST_MAX=64
 host_cap_ok() {
   local total; total="$(host_managed_count)"
@@ -1304,7 +1450,7 @@ cmd_reconcile_drain() {
   # Disown an inherited fleet-lock fd (this can be nohup'd from cmd_start, which holds
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
-  exec 8>&- 9>&- 2>/dev/null || true
+  { exec 8>&- 9>&-; } 2>/dev/null || true
   local deadline announced=0 lost
   rm -f "$RECONCILE_SHRINK"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
   deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
@@ -1359,7 +1505,10 @@ cmd_start() {
     nohup "$0" --fleet "$FLEET" fleet-drain-rename >>"$FARM_LOG" 2>&1 &
     return 0
   }
-  [ -z "$ACCESS_TOKEN" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
+  # A scale-set fleet authenticates with its own named credential (GH_CREDENTIAL), which
+  # may be a GitHub App and so need no PAT at all — the listener validates it and says so
+  # in the log. Only the legacy path mints registration tokens from ACCESS_TOKEN.
+  [ -z "$ACCESS_TOKEN" ] && [ "$FLEET_MODE" != "scale-set" ] && { err "no GitHub token configured (set it in the web UI). Use 'validate' to test provisioning without one."; return 1; }
   rm -f "$SECURITY_CACHE"                       # force a fresh public-repo check on an explicit Start
   local secp; secp="$(public_repo_problem)"
   [ -n "$secp" ] && err "SECURITY: $secp"       # warn, do not block (operator's call)
@@ -1378,6 +1527,32 @@ cmd_start() {
     [ -n "$c" ] && ! on_expected_network "$c" && { need_migrate=1; break; }
   done
   [ "$need_migrate" = 1 ] && { log "network mode changed -> migrating runners onto the new network in the background as they go idle"; nohup "$0" --fleet "$FLEET" reconcile-drain >>"$FARM_LOG" 2>&1 & }
+  if [ "$FLEET_MODE" = "scale-set" ]; then
+    # A JIT runner is never restarted or recreated: its config is single-use and the job
+    # assignment it was minted for timed out long ago, so a resurrected one would idle
+    # forever occupying a capacity slot GitHub still counts. Sweep the corpses and let
+    # the listener mint replacements from GitHub's own demand instead.
+    #
+    # But sweep routes to cmd_jit_remove, which deliberately never deregisters. On a fleet
+    # that just switched legacy -> scale-set, the runners still up are LEGACY ones holding
+    # live registrations: dropped that way they keep accepting jobs from GitHub forever
+    # with no container behind them. A JIT runner carries the gh-runner-name label, so
+    # anything managed without one predates the switch and needs the full remove_runner.
+    for c in $(managed_names); do
+      [ -n "$c" ] || continue
+      [ -n "$(docker inspect -f '{{index .Config.Labels "net.unraid.ci-runner-farm.gh-runner-name"}}' "$c" 2>/dev/null)" ] && continue
+      log "fleet $FLEET switched to scale-set mode — deregistering and removing legacy runner $c"
+      remove_runner "$c"
+    done
+    cmd_sweep
+    scaleset_start || return 1
+    # No autoscale daemon here, deliberately: GitHub tells us how many runners it wants,
+    # so AUTOSCALE_MIN/MAX are meaningless and scale_down_idle is actively wrong — it
+    # would delete a runner that GitHub had just assigned a job to. No image-update
+    # daemon either: its rollover recreates each runner, which a JIT runner cannot be.
+    log "fleet up: scale-set listener for '$SCALESET_NAME' ($(managed_names | wc -l) runner(s) live)"
+    return 0
+  fi
   # bring back any runners Unraid/Docker left exited (array stop, daemon restart)
   start_stopped_managed
   # with autoscaling on, start the floor (MIN) and let the daemon grow to demand
@@ -1403,6 +1578,214 @@ remove_runner() {
   [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$c" 2>/dev/null || true
 }
 
+# ── Scale-set provisioning verbs (the crf-scalesetd boundary) ────────────────
+# Everything the listener is allowed to ask of this host. Nothing crosses this
+# boundary but file paths and JSON: the daemon never opens the Docker socket and never
+# reads a .cfg, so Docker access and config parsing stay in exactly one place.
+# Every verb answers with the three-code contract at EX_TEMPFAIL above.
+
+# Resolve a credential set NAME to the files that hold it, echoing
+# "type|token_path|app_meta_path|app_key_path" (type: pat | app | none). Pipe-delimited,
+# not tab: tab is IFS whitespace, so `read` would collapse the empty fields and shift
+# the paths into the wrong variables.
+#
+# The type is DERIVED from which files exist and is never declared: a TYPE= field in a
+# cfg the web form rewrites can end up describing a credential that was since replaced,
+# and then the daemon authenticates the wrong way and reports a confusing 401.
+credential_facts() {
+  local name="$1"
+  # Validate BEFORE any path is built from it. GH_CREDENTIAL is free text off the Fleet
+  # tab and crf_cfg_clean strips only quotes and newlines, so '/' and '..' survive — and
+  # the path built below is emitted in config-json and opened by the listener as a bearer
+  # token. Guarding here covers every caller rather than each path site.
+  printf '%s' "$name" | grep -qE '^[A-Za-z0-9._-]+$' || { err "credential name '$name' is invalid — use only letters, digits, dot, dash or underscore"; return 1; }
+  local tok="${CREDDIR}/${name}.token" meta="${CREDDIR}/${name}.app" key="${CREDDIR}/${name}.app.pem"
+  # Credential `default` IS the legacy bare token file, unless a credentials/ entry
+  # shadows it — the same trick as fleet `default` being the legacy cfg, so upgrading
+  # writes nothing to flash and an existing install keeps authenticating.
+  [ "$name" = default ] && [ ! -f "$tok" ] && [ ! -f "$key" ] && tok="$TOKEN_FILE"
+  if [ -f "$key" ] && [ -f "$tok" ]; then
+    err "credential '$name' has BOTH a PAT and an App private key — remove one; guessing which the operator meant is how you authenticate as the wrong identity"
+    return 1
+  fi
+  if [ -f "$key" ]; then printf 'app||%s|%s' "$meta" "$key"; return 0; fi
+  if [ -f "$tok" ]; then printf 'pat|%s||' "$tok"; return 0; fi
+  # "none" rather than an error: the daemon fails loudly with the credential NAME in
+  # its own log, which is where an operator looking for it will be.
+  printf 'none|||'
+}
+
+# The GitHub URL this fleet's scale set belongs to. DERIVED per fleet from the scope
+# settings, never stored: the URL is a property of the fleet, not of the credential, so
+# two fleets can share one App installation and still target different orgs/repos.
+github_config_url() {
+  if [ "$GH_SCOPE" = "org" ]; then
+    [ -n "$GH_OWNER" ] && printf 'https://github.com/%s' "$GH_OWNER"
+    return 0
+  fi
+  # shellcheck disable=SC2206  # GH_REPOS is a deliberately space-separated list
+  local arr=($GH_REPOS)
+  [ "${#arr[@]}" -gt 0 ] && printf 'https://github.com/%s' "${arr[0]}"
+  return 0
+}
+
+json_str() { printf '%s' "${1:-}" | json_string; }
+# Emit a JSON number or 0. A cfg value is operator-typed text, and an unquoted stray
+# there would produce a JSON body the daemon cannot decode at all.
+json_int() { case "${1:-}" in ''|*[!0-9]*) printf 0 ;; *) printf '%s' "$1" ;; esac; }
+
+# The resolved config the listener needs, as JSON. It exists so that Go is never a
+# FOURTH place a default lives — config-parity.sh already fails CI over the three that
+# do. NO SECRET MATERIAL: credentials are emitted as PATHS and the daemon opens them
+# itself, so a key never passes through a pipe, a log line or an argv.
+cmd_config_json() {
+  local facts type tokp metap keyp maxr minr
+  facts="$(credential_facts "$GH_CREDENTIAL")" || return 1
+  IFS='|' read -r type tokp metap keyp <<< "$facts"
+  # Capacity only ADVERTISES what this host will host — GitHub does the scaling in
+  # scale-set mode, so these are a ceiling for the listener's max-capacity header, not
+  # a target it drives towards.
+  if [ "$AUTOSCALE" = "true" ]; then maxr="$AUTOSCALE_MAX"; minr="$AUTOSCALE_MIN"; else maxr="$RUNNER_COUNT"; minr="$RUNNER_COUNT"; fi
+  printf '{"fleet":%s,"fleet_mode":%s,"scale_set_name":%s,"runner_group":%s,"runner_labels":%s,' \
+    "$(json_str "$FLEET")" "$(json_str "$FLEET_MODE")" "$(json_str "$SCALESET_NAME")" \
+    "$(json_str "$RUNNER_GROUP")" "$(json_str "$RUNNER_LABELS")"
+  printf '"github_config_url":%s,"scope":%s,"max_runners":%s,"min_runners":%s,"drain_timeout":%s,' \
+    "$(json_str "$(github_config_url)")" "$(json_str "$GH_SCOPE")" \
+    "$(json_int "$maxr")" "$(json_int "$minr")" "$(json_int "$SCALESET_DRAIN_TIMEOUT")"
+  printf '"credential":{"name":%s,"type":%s,"token_path":%s,"app_meta_path":%s,"app_key_path":%s}}\n' \
+    "$(json_str "$GH_CREDENTIAL")" "$(json_str "$type")" \
+    "$(json_str "$tokp")" "$(json_str "$metap")" "$(json_str "$keyp")"
+}
+
+# Provision ONE just-in-time runner. $1 = path to the base64 JIT config the listener
+# minted, $2 = the runner name GitHub minted with it. Prints the container name on
+# stdout (and nothing else — the listener records it) and takes the fleet lock in `jit`
+# mode, so contention comes back as 75 and the listener retries instead of giving up.
+cmd_jit_start() {
+  JITCONFIG_FILE="$1"; GH_RUNNER_NAME="$2"
+  [ -f "$JITCONFIG_FILE" ] || { err "jit-start: no JIT config at '$JITCONFIG_FILE'"; return 1; }
+  [ -n "$GH_RUNNER_NAME" ] || { err "jit-start: no GitHub runner name given"; return 1; }
+  # build_args mkdir -p's docker/<name>, dind-logs/<name> and work/<name> under
+  # $CACHE_ROOT, so this is the one provisioning path that could chown/populate a bad
+  # root (cmd_start, cmd_scale, cmd_validate and boot-autostart all guard first). The
+  # listener is long-lived and re-reads config, so an operator retyping CACHE_ROOT
+  # mid-flight lands exactly here. A bad root is a real fault, not back-pressure —
+  # exit 1, because retrying cannot fix it.
+  check_cache_root || return 1
+  # Lowest FREE index, picked under the fleet lock so it cannot be handed out twice.
+  # Keeping the ci-runner-N shape is what lets every name-keyed thing that already
+  # exists keep working unchanged: the index label, $CACHE_ROOT/work/<name> and
+  # docker/<name>, remove_runner's path-safety argument, and exec.php's
+  # ^ci-runner-[0-9]+$ filter. One `docker ps` for the whole scan, not one per index.
+  local taken idx name="" pslist
+  # Check the ps exit status: a Docker that is not responding produces the same EMPTY
+  # output as an empty box, so the scan would hand out index 1 on top of a live runner,
+  # docker run would fail on the name conflict, and a transient outage would be reported
+  # as a hard failure that stops the fleet provisioning for good.
+  pslist="$(docker ps -a --format '{{.Names}}')" || { err "jit-start: docker is not responding — retrying"; return "$EX_TEMPFAIL"; }
+  taken=" $(printf '%s\n' "$pslist" | tr '\n' ' ') "
+  for idx in $(seq 1 "$HARD_MAX"); do
+    case "$taken" in *" ${NAME_PREFIX}-${idx} "*) continue ;; esac
+    name="${NAME_PREFIX}-${idx}"; break
+  done
+  # Capacity is back-pressure, not a fault: the listener waits and asks again once a
+  # job finishes, exactly as it would for a contended lock.
+  [ -n "$name" ] || { err "jit-start: fleet $FLEET is at its hard cap of $HARD_MAX runners"; return "$EX_TEMPFAIL"; }
+  build_args "$idx" "$name" || { err "jit-start: could not assemble the runner arguments for $name"; return 1; }
+  # The host lock is taken inline rather than through with_host_lock for one reason: that
+  # helper exits 1 on timeout, and 1 tells the listener "this fleet is broken, stop
+  # provisioning" — permanently, since nothing restarts it (ADR-0002). A 30s wait on the
+  # shared mirror/firewall is another fleet provisioning, i.e. transient back-pressure, so
+  # it must be 75. with_host_lock's own exit 1 is left untouched for its UI callers.
+  ( flock -w 30 6 || { err "jit-start: host busy (another fleet is provisioning the shared mirror/firewall) — retrying"; exit "$EX_TEMPFAIL"; }; _jit_run_one ) 6>"$HOST_LOCK"
+  local rc=$?
+  [ "$rc" -eq "$EX_TEMPFAIL" ] && return "$EX_TEMPFAIL"
+  [ "$rc" -ne 0 ] && { err "jit-start: docker run failed for $name"; return 1; }
+  printf '%s\n' "$name"
+}
+_jit_run_one() {
+  host_cap_ok || return "$EX_TEMPFAIL"   # box-wide ceiling, checked under the same hold as the run
+  docker run "${ARGS[@]}" >/dev/null; local rc=$?
+  # Unlink the blob the moment `docker run` returns, whether it succeeded or not: the
+  # bind mount already holds the inode, so the container reads it normally and the
+  # inode is freed when the container is removed. This is what stops a listener that
+  # dies mid-provision from leaving a decodable RSA private key on tmpfs. Deliberately
+  # NOT done on the capacity path above, where nothing consumed it and the listener
+  # will retry with the same file.
+  rm -f "$JITCONFIG_FILE"
+  return $rc
+}
+
+# Retire one JIT runner by container name. This is remove_runner MINUS
+# deregister_runner_api: a JIT runner has no long-lived registration to drop — GitHub
+# retires the runner record with the job assignment it was minted for.
+# Idempotent, because the listener can race `sweep` or a container that already exited.
+cmd_jit_remove() {
+  local c="$1"
+  # Validate BEFORE any path is derived from it. The name arrives straight off the
+  # daemon boundary and ends up in the rm -rf target below, where an empty or crafted
+  # value would make that target the parent dir.
+  printf '%s' "$c" | grep -qE "^${NAME_PREFIX}-[0-9]+$" || { err "jit-remove: refusing bad container name '$c'"; return 1; }
+  # "docker responded and the container is absent" (idempotent success) and "docker did
+  # not respond" produce the same empty output, so check the exit status: reporting 0 for
+  # the second would tell the listener a runner was removed while it is still running and
+  # still holding its job. Same transient-outage verdict as jit-start — retry, don't
+  # condemn the fleet.
+  local existing
+  existing="$(docker ps -a --format '{{.Names}}')" || { err "jit-remove: docker is not responding — cannot confirm $c is gone; retrying"; return "$EX_TEMPFAIL"; }
+  printf '%s\n' "$existing" | grep -qx "$c" || return 0
+  docker stop -t 30 "$c" >/dev/null 2>&1
+  docker rm -f "$c" >/dev/null 2>&1
+  [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$c" 2>/dev/null
+  return 0
+}
+
+# Garbage-collect EXITED managed containers of this fleet — the scale-set replacement
+# for reap_dead_runners. A scale-set fleet SWEEPS rather than restarts: a restarted JIT
+# runner holds an assignment that timed out long ago, so it would idle forever holding
+# a capacity slot. reap_dead_runners' unhealthy-but-RUNNING branch has no analogue here
+# either — a JIT runner has no registration to lose, and the listener's own session is
+# the authority on whether it is still wanted.
+#
+# Never touches a RUNNING container: `jit-remove` is the verb for intent, `sweep` is
+# garbage collection, and keeping those apart is what stops a slow tick from removing a
+# runner that is mid-job.
+cmd_sweep() {
+  local c st n=0
+  for c in $(managed_names); do
+    [ -n "$c" ] || continue
+    st="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null)"
+    case "$st" in exited|dead) ;; *) continue ;; esac
+    cmd_jit_remove "$c" >/dev/null 2>&1 && n=$((n+1))
+  done
+  [ "$n" -gt 0 ] && log "sweep: removed $n finished runner(s)"
+  return 0
+}
+
+# The join between the two names a JIT runner has: the container name this engine owns
+# and the runner name GitHub minted. Called on the listener's reconcile tick, which can
+# run every few seconds on a churning fleet — so unlike status-json (the UI's 5s poll)
+# it makes NO docker exec probes and NO GitHub calls, just one ps and one batched
+# inspect for the whole fleet.
+cmd_jit_list() {
+  local names inspraw="" out="" first=1 c row st gh idx
+  names="$(managed_names)"
+  # shellcheck disable=SC2086  # $names is intentionally word-split into one arg per runner
+  [ -n "$names" ] && inspraw="$(docker inspect -f '{{.Name}}|{{.State.Running}}|{{index .Config.Labels "net.unraid.ci-runner-farm.gh-runner-name"}}|{{index .Config.Labels "net.unraid.ci-runner-farm.index"}}' $names 2>/dev/null)"
+  for c in $names; do
+    [ -n "$c" ] || continue
+    row="$(printf '%s\n' "$inspraw" | grep -m1 -E "^/?${c}\|")"   # {{.Name}} carries a leading '/'
+    IFS='|' read -r _ st gh idx <<< "$row"
+    # A pre-label container (or one whose label was dropped) falls back to the trailing
+    # number of its own name, so the listener still gets a usable index.
+    case "$idx" in ''|*[!0-9]*) idx="${c##*-}" ;; esac
+    [ $first -eq 0 ] && out+=","
+    out+="{\"container\":$(json_str "$c"),\"gh_runner_name\":$(json_str "$gh"),\"index\":$(json_int "$idx"),\"running\":$([ "$st" = "true" ] && echo true || echo false)}"
+    first=0
+  done
+  printf '{"runners":[%s]}\n' "$out"
+}
+
 # Full teardown: daemons, runner containers, and the shared pull-through mirror.
 # Reached from the UI Stop button AND from plugin uninstall (the .plg remove step
 # calls 'stop'), so it must leave nothing running. The mirror's on-pool cache dir
@@ -1412,9 +1795,23 @@ remove_runner() {
 cmd_stop() {
   autoscale_stop
   imageupdate_stop
+  # Stop the listener FIRST so it cannot mint a replacement for a runner we are about to
+  # remove. scaleset_stop BLOCKS until the listener's own bounded drain has finished, so
+  # ADR-0004's "in-flight jobs get up to SCALESET_DRAIN_TIMEOUT" actually happens — it
+  # used to return the instant SIGTERM was sent, and the remove loop below then killed
+  # every running job with a `docker stop -t 30`, i.e. the drain never ran on this path.
+  local scaleset=0; [ "$FLEET_MODE" = "scale-set" ] && scaleset=1
+  scaleset_stop
   local names; names="$(managed_names)"
   if [ -z "$names" ]; then
     log "no managed runners running"
+  elif [ "$scaleset" = 1 ]; then
+    # Whatever survived the drain is a JIT runner, which by construction has no
+    # long-lived registration: remove_runner's deregister_runner_api would be a GitHub
+    # round trip per container that can only fail to find one. jit-remove is the same
+    # teardown minus that call — and falls back for a stray non-JIT name (e.g. a
+    # ci-runner-validate left by a crashed validate) which it refuses by design.
+    echo "$names" | while read -r c; do [ -n "$c" ] && { log "removing $c"; cmd_jit_remove "$c" || remove_runner "$c"; }; done
   else
     echo "$names" | while read -r c; do [ -n "$c" ] && { log "stopping $c (graceful deregister)"; remove_runner "$c"; }; done
   fi
@@ -1442,13 +1839,16 @@ cmd_stop() {
 
 cmd_scale() {
   local target="$1"
+  # GitHub sizes a scale-set fleet, so there is nothing coherent to scale to here: a
+  # runner cannot be hand-started without a JIT config minted per job assignment, and
+  # scaling DOWN would remove a runner GitHub has just handed work to.
+  [ "$FLEET_MODE" = "scale-set" ] && { err "fleet $FLEET is a scale set — GitHub decides how many runners it needs; scale is not available"; return 1; }
   # Server-side validate + clamp. The form's max="20" is presentation-only, so a
   # crafted POST (n=99999) would otherwise drive an unbounded provisioning loop —
   # a container + a minted GitHub registration token per iteration (host / API
   # exhaustion). The autoscale path is already bounded by AUTOSCALE_MAX; bound the
   # manual path with a hard ceiling too.
   case "$target" in ''|*[!0-9]*) err "scale target must be a non-negative integer"; return 1 ;; esac
-  local HARD_MAX=64
   [ "$target" -gt "$HARD_MAX" ] && { log "scale: clamping requested $target to hard max $HARD_MAX"; target=$HARD_MAX; }
   # Guard the cache-root shape BEFORE ensure_dirs runs mkdir/chown under it — on every
   # scale path (down/same, not just up), so an unsafe CACHE_ROOT never gets provisioned.
@@ -1933,12 +2333,16 @@ cmd_status_json() {
   out+="]"
   local as="off"; [ "$AUTOSCALE" = "true" ] && as="$(autoscale_status)"
   local iu="off"; [ "$IMAGE_AUTOUPDATE" = "true" ] && iu="$(imageupdate_status) (every $((IMAGE_AUTOUPDATE_INTERVAL/60))m)"
+  # ADR-0002 justifies having NO watchdog on the grounds that the UI reports a dead
+  # listener instead. Nothing did — this is that report, so a crashed listener shows up as
+  # "stopped" on the poll rather than as jobs silently queueing forever on GitHub's side.
+  local ss="off"; [ "$FLEET_MODE" = "scale-set" ] && ss="$(scaleset_status) ('$SCALESET_NAME')"
   local warn; warn="$(cat "$WARN_CACHE" 2>/dev/null | json_escape)"
   # Read the security verdict from cache (written by cmd_usage_refresh) — never call
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$SEC_CACHE" 2>/dev/null | json_escape)"
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
+  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"fleet_mode\":\"$(echo "$FLEET_MODE" | json_escape)\",\"scaleset\":\"$(echo "$ss" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -2108,12 +2512,24 @@ cmd_fleet_drain_rename() {
   # Drop every lock fd inherited from the cmd_fleet_rename that nohup'd us (fd 6 host,
   # fd 8 fleet): we outlive that process by hours, and holding its host lock would wedge
   # every other fleet. See cmd_reconcile_drain, which does the same for fd 8.
-  exec 6>&- 8>&- 9>&- 2>/dev/null || true
-  local target deadline cap c want retired
+  # Grouped: an ungrouped `exec ... 2>/dev/null` makes the redirect permanent and every
+  # err() below (rename target missing, drain timeout) would vanish for the whole handover.
+  { exec 6>&- 8>&- 9>&-; } 2>/dev/null || true
+  local target deadline cap c want retired scaleset=0
   target="$(drain_target)"
   [ -n "$target" ] || { err "fleet $FLEET is not being renamed"; return 1; }
   [ -f "$(cfg_path "$target")" ] || { err "rename target $target has no config — leaving fleet $FLEET as it is"; return 1; }
   autoscale_stop; imageupdate_stop            # nothing may regrow the fleet mid-handover
+  # A scale-set fleet regrows from GitHub, not from us: leave its listener up and it mints
+  # a replacement for every runner retired below, so `managed_names > 0` never reaches zero
+  # and the rename hangs until IMAGE_DRAIN_TIMEOUT. Stop it, then hand the scale set to the
+  # NEW fleet's listener — cmd_scale refuses on a scale-set fleet, so the per-runner refill
+  # further down cannot populate the target and the target would come up empty.
+  if [ "$FLEET_MODE" = "scale-set" ]; then
+    scaleset=1
+    scaleset_stop
+    "$0" --fleet "$target" start >>"$FARM_LOG" 2>&1
+  fi
   # Match cmd_start's sizing rule so the new fleet lands on the size it would have been
   # started at, not RUNNER_COUNT while autoscaling wants the floor.
   cap="$RUNNER_COUNT"; [ "$AUTOSCALE" = "true" ] && cap="$AUTOSCALE_MIN"
@@ -2130,7 +2546,9 @@ cmd_fleet_drain_rename() {
       retired=1
       break                                   # one per pass, then refill before the next
     done
-    if [ "$retired" = 1 ]; then
+    # Skipped in scale-set mode: the target's listener was started above and refills from
+    # GitHub's own demand, and cmd_scale refuses on a scale-set fleet anyway.
+    if [ "$retired" = 1 ] && [ "$scaleset" = 0 ]; then
       want=$(( $(fleet_container_count "$target") + 1 ))
       [ "$want" -le "$cap" ] && "$0" --fleet "$target" scale "$want" >>"$FARM_LOG" 2>&1
     fi
@@ -2308,7 +2726,9 @@ cmd_build_image() {
 # ones, and (re)starts the autoscale daemon, so the fleet self-heals after a
 # reboot OR a Docker restart.
 cmd_boot_autostart() {
-  [ -n "$ACCESS_TOKEN" ] || { log "boot-autostart: no token configured yet — skipping"; return 0; }
+  # Same exemption as cmd_start: a scale-set fleet may authenticate with a GitHub App
+  # credential and have no PAT at all, so an empty token is not "unconfigured" there.
+  [ -n "$ACCESS_TOKEN" ] || [ "$FLEET_MODE" = "scale-set" ] || { log "boot-autostart: no token configured yet — skipping"; return 0; }
   local i
   for i in $(seq 1 150); do
     docker info >/dev/null 2>&1 && check_cache_root >/dev/null 2>&1 && break
@@ -2348,6 +2768,18 @@ case "${1:-status}" in
   # No host lock: this runs for hours and takes the locks it needs per step.
   fleet-drain-rename) cmd_fleet_drain_rename ;;
   fleet-delete) with_host_lock cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
+  # crf-scalesetd boundary. Only jit-start mutates the fleet, so only it takes the
+  # fleet lock — in `jit` mode, so a contended lock comes back as 75 (retry) instead of
+  # 1 (fleet is broken). Read-only verbs must NOT take it: jit-list runs on the
+  # listener's reconcile tick and would then contend with an operator's Stop.
+  config-json)  cmd_config_json ;;
+  jit-start)    with_fleet_lock jit cmd_jit_start "${2:?usage: jit-start <jitconfig-path> <github-runner-name>}" "${3:?usage: jit-start <jitconfig-path> <github-runner-name>}" ;;
+  jit-remove)   with_fleet_lock jit cmd_jit_remove "${2:?usage: jit-remove <container-name>}" ;;
+  jit-list)     cmd_jit_list ;;
+  sweep)        with_fleet_lock jit cmd_sweep ;;
+  scaleset-start)  scaleset_start ;;
+  scaleset-stop)   if [ "$FLEET_EXPLICIT" = 1 ]; then scaleset_stop "${2:-}"; else for_each_fleet scaleset-stop "${2:-}"; fi ;;
+  scaleset-status) scaleset_status ;;
   image-info-json) cmd_image_info_json ;;
   queued-json)  cmd_queued_json ;;
   queued-refresh) cmd_queued_refresh ;;
@@ -2381,5 +2813,5 @@ case "${1:-status}" in
   imageupdate-start)  imageupdate_start ;;
   imageupdate-stop)   if [ "$FLEET_EXPLICIT" = 1 ]; then imageupdate_stop; else for_each_fleet imageupdate-stop; fi ;;
   imageupdate-status) imageupdate_status ;;
-  *) echo "usage: $0 [--fleet <name>] {start|boot-autostart|fleets-json|fleet-create N|fleet-rename OLD NEW|fleet-delete N|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status}"; exit 1 ;;
+  *) echo "usage: $0 [--fleet <name>] {start|boot-autostart|fleets-json|fleet-create N|fleet-rename OLD NEW|fleet-delete N|stop|restart|scale N|status|status-json|logs i|validate|build-image|prune-cache|autoscale-tick|autoscale-start|autoscale-stop|autoscale-status|imageupdate-tick|imageupdate-start|imageupdate-stop|imageupdate-status|config-json|jit-start BLOB NAME|jit-remove NAME|jit-list|sweep|scaleset-start|scaleset-stop|scaleset-status}"; exit 1 ;;
 esac

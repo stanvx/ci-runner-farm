@@ -26,7 +26,18 @@ function crf_fields($layer) {
       ['RUNNER_GROUP','Runner group','text',['help'=>'Optional runner group (org scope) to restrict which repos may use the pool &mdash; e.g. exclude public repos so fork PRs never run here.']],
       ['RUNNER_LABELS','Runner labels','text',['help'=>'Comma-separated labels that workflows target with runs-on, e.g. self-hosted,unraid,build.']],
     ]],
-    ['Capacity', 'How many runners this fleet keeps, and whether that number is fixed.', [
+    ['Runner provisioning', 'How runners for this fleet come into existence. Applies on the next <b>Start</b>.', [
+      ['FLEET_MODE','Fleet mode','select',['options'=>[
+          'legacy'=>'legacy (this plugin registers persistent runners)','scale-set'=>'scale set (GitHub provisions runners per job)'],
+        'help'=>'<b>legacy</b> (default): the plugin starts a fixed (or autoscaled) pool of long-lived runners, each registered with a short-lived registration token. <br><br><b>scale set</b>: a listener connects to a GitHub <b>runner scale set</b> and starts one throwaway runner per job GitHub assigns &mdash; GitHub decides how many runners you need, so Autoscaling and manual Scale do not apply, and each runner is destroyed after its job. Requires a scale set name below.']],
+      ['SCALESET_NAME','Scale set name','text',['placeholder'=>'blank = not configured',
+        'help'=>'Name of the GitHub runner scale set, and the value your workflows put in <code>runs-on:</code>. Created on the org/repo above if it does not exist yet. Used only when Fleet mode is <b>scale set</b>; a scale-set fleet refuses to start without it, rather than quietly listening to a set no workflow targets.']],
+      ['GH_CREDENTIAL','Credential','text',['placeholder'=>'default',
+        'help'=>'<b>Name</b> of a credential set, never a secret &mdash; secrets live in <code>/boot/config/plugins/ci-runner-farm/credentials/</code> (chmod 600) and never in this config. <code>default</code> is the GitHub token saved on the Settings tab, so an existing install needs no change. A GitHub App credential is <code>&lt;name&gt;.app</code> + <code>&lt;name&gt;.app.pem</code>; a PAT is <code>&lt;name&gt;.token</code>. Which one a name is, is derived from the files present.']],
+      ['SCALESET_DRAIN_TIMEOUT','Scale set: stop drain timeout (s)','number',['min'=>0,'max'=>86400,
+        'help'=>'How long <b>Stop</b> waits for in-flight jobs to finish before force-removing the runners. Shorter than the image auto-update drain on purpose: this one is holding up an operator who asked the fleet to stop. <code>0</code> = do not wait.']],
+    ]],
+    ['Capacity', 'How many runners this fleet keeps, and whether that number is fixed. Ignored in scale-set mode &mdash; GitHub sizes the fleet there.', [
       ['RUNNER_COUNT','Concurrent runners','number',['min'=>1,'max'=>20,
         'help'=>'How many runner containers to launch. Each runs one job at a time, so this equals your maximum number of concurrent builds.']],
       ['AUTOSCALE','Autoscaling','select',['options'=>[

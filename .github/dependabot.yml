@@ -1,0 +1,16 @@
+version: 2
+
+updates:
+  # The Go listener is the only dependency surface in this repo (the plugin
+  # itself is bash + PHP with no package manager).
+  - package-ecosystem: gomod
+    directory: /daemon
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    ignore:
+      # github.com/actions/scaleset is a public preview module whose interfaces
+      # still move between patch releases, so an automated bump lands a PR that
+      # does not compile. Upgrading it is a deliberate PR that touches code.
+      - dependency-name: github.com/actions/scaleset

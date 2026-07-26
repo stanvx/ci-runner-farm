@@ -342,9 +342,12 @@ function crfRenderIdentity(){
   const h=crfHealth(f), cfg=+f.configured||0;
   const nm=document.getElementById('crf-id-name'); if(nm) nm.textContent=f.name;
   const st=document.getElementById('crf-id-status');
+  // 'scale-set' with the hyphen is the engine's literal (FLEET_MODE in runner-farm.sh, the
+  // select value in crf-fields.php). Spelt 'scaleset' here, every scale-set fleet read back
+  // as "Legacy registration".
   if(st) st.innerHTML='<span class="crf-ball crf-h-'+h+'"></span><b>'+CRF_HEALTH_LABEL[h]+'</b>'+
     '<span class="crf-sep">·</span><span>'+(+f.running||0)+' of '+cfg+' runner'+(cfg===1?'':'s')+'</span>'+
-    '<span class="crf-sep">·</span><span class="crf-muted">'+(f.mode==='scaleset'?'Scale set':'Legacy registration')+'</span>';
+    '<span class="crf-sep">·</span><span class="crf-muted">'+(f.mode==='scale-set'?'Scale set':'Legacy registration')+'</span>';
   const dr=document.getElementById('crf-drain');
   if(dr){
     if(f.draining_to){ dr.textContent='⟳ '+f.name+' is being renamed to '+f.draining_to+' — runners move across as they go idle, and '+f.name+' disappears once its last one is gone.'; dr.style.display='block'; }
@@ -690,20 +693,42 @@ function crfRefresh(){
     // "N of M runners" one line above.
     const as=String(d.autoscale||'off'), autoOn=!/^off\b/.test(as);
     const asb=as.match(/\[(\d+)-(\d+), buffer (\d+)\]/);
-    put('crf-cap-v', autoOn ? up+' online' : up+' / '+(d.configured??0)+' online');
+    // A scale-set fleet runs neither the autoscale nor the image-update daemon (cmd_start
+    // returns before either), and RUNNER_COUNT is not its size — GitHub is. The daemon
+    // whose liveness matters here is the listener, which ADR-0002 leaves UNSUPERVISED on
+    // the grounds that the UI reports it dead; nothing did until this read d.scaleset, so
+    // a crashed listener looked identical to an idle fleet while jobs queued on GitHub.
+    // The engine ships `scaleset` pre-formatted: "off", or scaleset_status() ("running
+    // (pid N)" / "stopped") with " ('<set name>')" appended — test the prefix, not equality.
+    const ssOn=d.fleet_mode==='scale-set', ss=String(d.scaleset||'off');
+    const ssName=(ss.match(/\('(.*)'\)$/)||[])[1]||'';
+    put('crf-cap-v', (autoOn||ssOn) ? up+' online' : up+' / '+(d.configured??0)+' online');
     put('crf-cap-s', busy+' busy · '+idle+' idle');
-    put('crf-cap-mode','Capacity: '+(autoOn
+    put('crf-cap-mode','Capacity: '+(ssOn
+      ? ('GitHub scale set'+(ssName?' · '+ssName:''))
+      : autoOn
       ? ('Automatic'+(asb?' · '+asb[1]+' minimum · '+asb[2]+' maximum · '+asb[3]+' warm':''))
       : ('Manual · desired '+(d.configured??0))));
     // AUTOSCALE=true with a dead daemon means the fleet stopped growing — a degraded
     // state that reads as nothing more than the word "stopped" inside that string.
     const dead=document.getElementById('crf-cap-dead');
-    if(dead) dead.hidden=!(autoOn&&/^stopped\b/.test(as));
+    if(dead){
+      const down=ssOn ? /^stopped\b/.test(ss) : (autoOn&&/^stopped\b/.test(as));
+      if(down) dead.textContent=ssOn
+        ? 'The scale-set listener is not running — GitHub jobs will queue until it is started.'
+        : 'Autoscale is enabled but its daemon is not running.';
+      dead.hidden=!down;
+    }
     // Image auto-update keeps a home here (variant D drops it entirely): it carries
     // daemon liveness the toggle on Settings cannot, and the two background daemons
     // that resize the fleet belong together.
     // Same treatment: imageupdate_status() embeds a pid the operator has no use for.
-    put('crf-cap-iu','Image auto-update: '+String(d.image_autoupdate||'off').replace(/\s*\(pid \d+\)/,''));
+    // Same treatment for the listener, which takes this slot on a scale-set fleet: image
+    // auto-update is always "off" there (its rollover recreates runners, which a JIT
+    // runner cannot be), so printing it would report on a daemon that cannot exist.
+    put('crf-cap-iu', ssOn
+      ? 'Scale-set listener: '+ss.replace(/\s*\(pid \d+\)/,'')
+      : 'Image auto-update: '+String(d.image_autoupdate||'off').replace(/\s*\(pid \d+\)/,''));
     window.CRF_UP=up; crfRenderQueue();
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the

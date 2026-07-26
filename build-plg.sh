@@ -5,6 +5,9 @@
 # base64 payload. Only the .plg is committed (its version stamp must be frozen at
 # the tag); the .tgz is rebuilt REPRODUCIBLY at publish (see make_tgz), so the
 # uploaded package always matches the packageMD5 the committed .plg advertises.
+# The Go scale-set listener (daemon/) ships the same way as a SECOND release
+# asset (see make_daemon) — keeping it out of the tarball is what lets src/ stay
+# a text-only image and the repo stay binary-free.
 #
 # Versioning (mirrors the other Unraid plugins we publish via release-please):
 #   INTERNAL_VERSION  SemVer source of truth (from .release-please-manifest.json),
@@ -27,7 +30,12 @@ NAME="ci-runner-farm"
 OUT="${NAME}.plg"
 SRCDIR="src/usr/local/emhttp/plugins/${NAME}"
 TGZ="${NAME}.tgz"
+DAEMON="crf-scalesetd"
 REPO="${REPO:-unraid/ci-runner-farm}"
+
+# Unquoted on purpose everywhere it is used: GO may carry a wrapper prefix, e.g.
+# GO='mise exec -- go' on a dev box where plain `go` is not on PATH.
+GO="${GO:-go}"
 
 # Build the .tgz package REPRODUCIBLY: byte-identical output (=> identical MD5)
 # across CI runs from the same source, so the publish job can rebuild the package
@@ -47,9 +55,27 @@ make_tgz() {
   tar ${opts[@]+"${opts[@]}"} -cf - -C "$SRCDIR" . | gzip -9n > "$TGZ"
 }
 
-# `build-plg.sh --tgz-only` just (re)builds the package — used by the release
-# jobs to regenerate the exact bytes the committed .plg already advertises.
+# Build the scale-set listener REPRODUCIBLY, on the same contract as make_tgz:
+# byte-identical output from the same source, so the publish job can rebuild the
+# binary the committed .plg's daemonMD5 pins instead of carrying it in git. It is
+# deliberately NOT in the .tgz — src/ is a byte-for-byte text image that CI checks
+# with `diff -r`, and a compiled artifact there would break that and bloat the repo.
+# -trimpath strips the builder's absolute paths and -buildid= strips the build ID,
+# the two things that otherwise differ between two machines building the same tree.
+# One target only: Unraid 6.12+ is x86_64 and the daemon only shells out and speaks
+# HTTPS, so CGO_ENABLED=0 gives a static binary that needs no libc on the host.
+make_daemon() {
+  $GO version >/dev/null 2>&1 || { echo "no Go toolchain: set GO (dev boxes: GO='mise exec -- go')" >&2; exit 1; }
+  # Main package: cmd/ layout if the module uses one, else the module root.
+  local pkg='.'
+  [ -d "daemon/cmd/${DAEMON}" ] && pkg="./cmd/${DAEMON}"
+  ( cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO build -trimpath -ldflags='-s -w -buildid=' -o "../${DAEMON}" "$pkg" )
+}
+
+# `build-plg.sh --tgz-only` / `--daemon-only` just (re)build one asset — used by
+# the release jobs to regenerate the exact bytes the committed .plg advertises.
 if [ "${1:-}" = "--tgz-only" ]; then make_tgz; echo "built $TGZ ($(wc -c < "$TGZ" | tr -d ' ') bytes)"; exit 0; fi
+if [ "${1:-}" = "--daemon-only" ]; then make_daemon; echo "built $DAEMON ($(wc -c < "$DAEMON" | tr -d ' ') bytes)"; exit 0; fi
 
 # Internal SemVer: explicit env wins, else the VERSION file, else 0.0.0 (dev).
 INTERNAL_VERSION="${INTERNAL_VERSION:-$( [ -f VERSION ] && tr -d '[:space:]' < VERSION || echo '0.0.0' )}"
@@ -75,6 +101,12 @@ SUPPORT_URL="https://github.com/${REPO}/issues"
 PACKAGE_NAME="${NAME}-${VERSION}.tgz"
 PACKAGE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${PACKAGE_NAME}"
 
+# The listener ships as a SECOND release asset on the identical URL+MD5 pattern.
+# Version-pinned for the same reason as the package: an old .plg must never
+# resolve a newer release's binary against the MD5 it was stamped with.
+DAEMON_NAME="${DAEMON}-${VERSION}"
+DAEMON_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${DAEMON_NAME}"
+
 # Portable MD5 (md5sum on Linux/CI, md5 on macOS/BSD dev boxes).
 md5_of() { if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else md5 -q "$1"; fi; }
 
@@ -88,6 +120,8 @@ fi
 
 make_tgz
 PACKAGE_MD5="$(md5_of "$TGZ")"
+make_daemon
+DAEMON_MD5="$(md5_of "$DAEMON")"
 
 cat > "$OUT" <<PLG
 <?xml version='1.0' standalone='yes'?>
@@ -101,6 +135,9 @@ cat > "$OUT" <<PLG
 <!ENTITY packageName   "${PACKAGE_NAME}">
 <!ENTITY packageURL    "${PACKAGE_URL}">
 <!ENTITY packageMD5    "${PACKAGE_MD5}">
+<!ENTITY daemonName    "${DAEMON_NAME}">
+<!ENTITY daemonURL     "${DAEMON_URL}">
+<!ENTITY daemonMD5     "${DAEMON_MD5}">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
 ]>
@@ -123,6 +160,14 @@ ${changes}
 <MD5>&packageMD5;</MD5>
 </FILE>
 
+<!-- scale-set listener: same download-and-verify pattern as the package, because
+     src/ is a text-only image CI checks with diff -r and git carries no binaries.
+     Unraid caches it on flash, so the on-boot reinstall still works offline. -->
+<FILE Name="&cfgdir;/&daemonName;">
+<URL>&daemonURL;</URL>
+<MD5>&daemonMD5;</MD5>
+</FILE>
+
 <!-- install (entities are NOT expanded inside CDATA, so use literal paths) -->
 <FILE Run="/bin/bash">
 <INLINE><![CDATA[
@@ -130,8 +175,11 @@ set -e
 PLGDIR="/usr/local/emhttp/plugins/${NAME}"
 CFGDIR="/boot/config/plugins/${NAME}"
 mkdir -p "\$CFGDIR" "\$PLGDIR"
-# Sweep any older package versions off flash, keeping this build's package.
-find "\$CFGDIR" -maxdepth 1 -name '${NAME}-*.tgz' ! -name '${PACKAGE_NAME}' -delete 2>/dev/null || true
+# Sweep older downloaded assets off flash, keeping this build's package + daemon.
+find "\$CFGDIR" -maxdepth 1 \\( \\
+     -name '${NAME}-*.tgz' ! -name '${PACKAGE_NAME}' -o \\
+     -name '${DAEMON}-*'   ! -name '${DAEMON_NAME}' \\
+     \\) -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
@@ -143,6 +191,10 @@ chmod 0755 "\$PLGDIR/include/runner-farm.sh"
 [ -d "\$PLGDIR/nchan" ] && find "\$PLGDIR/nchan" -type f -exec chmod 0755 {} +
 # Unraid's emhttp_event executes these on Docker service start/stop — must be +x
 [ -d "\$PLGDIR/event" ] && find "\$PLGDIR/event" -type f -exec chmod 0755 {} +
+# The listener arrives as its own <FILE> download, not in the tarball, so it needs
+# its own install + mode: the 0644 pass above only walks what the tarball extracted.
+mkdir -p "\$PLGDIR/bin"
+install -m 0755 "\$CFGDIR/${DAEMON_NAME}" "\$PLGDIR/bin/${DAEMON}"
 # Config defaults are NOT seeded to flash — the settings page and runner-farm.sh
 # both fall back to built-in defaults, so flash only ever holds what the user set.
 [ -f "\$CFGDIR/Dockerfile" ] || cp "\$PLGDIR/default.Dockerfile" "\$CFGDIR/Dockerfile"
@@ -197,8 +249,8 @@ PLGDIR="/usr/local/emhttp/plugins/${NAME}"
 CFGDIR="/boot/config/plugins/${NAME}"
 "\$PLGDIR/include/runner-farm.sh" stop 2>/dev/null || true
 rm -rf "\$PLGDIR"
-# The downloaded package is just a cache; drop it. Config + token stay.
-rm -f "\$CFGDIR"/${NAME}-*.tgz
+# The downloaded package + daemon are just caches; drop them. Config + token stay.
+rm -f "\$CFGDIR"/${NAME}-*.tgz "\$CFGDIR"/${DAEMON}-*
 echo "ci-runner-farm removed. Config + token left in /boot/config/plugins/${NAME} (delete manually to purge)."
 ]]></INLINE>
 </FILE>
@@ -206,4 +258,4 @@ echo "ci-runner-farm removed. Config + token left in /boot/config/plugins/${NAME
 </PLUGIN>
 PLG
 
-echo "built $OUT + $TGZ (version $VERSION, tag $RELEASE_TAG, package $(wc -c < "$TGZ" | tr -d ' ') bytes, md5 $PACKAGE_MD5)"
+echo "built $OUT + $TGZ + $DAEMON (version $VERSION, tag $RELEASE_TAG, package $(wc -c < "$TGZ" | tr -d ' ') bytes, md5 $PACKAGE_MD5, daemon md5 $DAEMON_MD5)"

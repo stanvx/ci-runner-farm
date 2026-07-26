@@ -30,6 +30,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # build-plg.sh now also compiles the scale-set listener, because the .plg
+      # stamps that binary's MD5 the same way it stamps the package's.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
       - name: Build .plg from src/
         env:
           REPO: ${{ github.repository }}
@@ -55,6 +63,16 @@ jobs:
             exit 1
           fi
 
+          # Same contract for the listener, which is a second <FILE> download:
+          # daemonMD5 must match the binary this build produced, because publish
+          # rebuilds it from the tag rather than carrying it between runs.
+          plg_bin_md5="$(sed -n 's/^<!ENTITY daemonMD5[[:space:]]*"\([0-9a-f]*\)">$/\1/p' "$plg")"
+          bin_md5="$(md5sum crf-scalesetd | cut -d' ' -f1)"
+          if [[ -z "$plg_bin_md5" || "$plg_bin_md5" != "$bin_md5" ]]; then
+            echo "daemonMD5 in $plg ($plg_bin_md5) does not match crf-scalesetd ($bin_md5)" >&2
+            exit 1
+          fi
+
           # And the package must contain exactly the source plugin tree.
           rm -rf /tmp/plgtree && mkdir -p /tmp/plgtree
           tar -xzf "$tgz" -C /tmp/plgtree
@@ -69,3 +87,43 @@ jobs:
             ci-runner-farm.plg
             ci-runner-farm.tgz
           if-no-files-found: error
+
+  daemon:
+    name: Scale-set listener (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
+      - name: Build, vet, test
+        working-directory: daemon
+        run: |
+          set -euo pipefail
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: Reproducible build (build twice, compare bytes)
+        run: |
+          set -euo pipefail
+          # The .plg pins the listener by MD5 and the publish job rebuilds it from
+          # the tag instead of carrying an artifact between runs, so a build that
+          # is not byte-identical breaks installs with a checksum failure. Prove it
+          # here, in the same spirit as config-parity.sh. The rebuild runs from a
+          # different absolute path with a cold build cache: those are the two
+          # things -trimpath and -buildid= exist to make irrelevant.
+          ./build-plg.sh --daemon-only
+          mv crf-scalesetd /tmp/first
+          cp -a "$GITHUB_WORKSPACE" /tmp/rebuild
+          go clean -cache
+          ( cd /tmp/rebuild && ./build-plg.sh --daemon-only )
+          cmp /tmp/first /tmp/rebuild/crf-scalesetd
+          echo "crf-scalesetd builds reproducibly (md5 $(md5sum /tmp/first | cut -d' ' -f1))"
