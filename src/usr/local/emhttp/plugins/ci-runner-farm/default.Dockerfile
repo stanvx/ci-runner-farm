@@ -38,6 +38,35 @@ RUN printf '%s\n' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh
 
+# Scale-set entrypoint. A scale-set fleet has no registration token: GitHub mints a
+# just-in-time config per assigned job, and ci-runner-farm bind-mounts it read-only and
+# names it in CRF_JITCONFIG_FILE. This replaces the base image entrypoint entirely (its
+# RUNNER_NAME/LABELS/RUNNER_SCOPE env contract is all carried inside the JIT config),
+# so it must also start dockerd itself, which that entrypoint used to do.
+# Unused in legacy mode, where the image is run exactly as before.
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  '# The blob decodes to this container RSA private key, so it arrives as a PATH to a' \
+  '# read-only mount, never as an env var a job step could print from its environment.' \
+  ': "${CRF_JITCONFIG_FILE:?jit-entrypoint: no JIT config path in CRF_JITCONFIG_FILE}"' \
+  '[ -r "$CRF_JITCONFIG_FILE" ] || { echo "jit-entrypoint: cannot read $CRF_JITCONFIG_FILE" >&2; exit 1; }' \
+  '# Stay in the image WORKDIR when the runner is there (it is, for the stock base);' \
+  '# fall back for an image that puts it elsewhere.' \
+  '[ -x ./bin/Runner.Listener ] || cd "${RUNNER_HOME:-/actions-runner}"' \
+  '# --jitconfig is how the runner takes a scale-set config. WorkFolder inside it is set' \
+  '# to /_work host-side, so nothing here has to place the work dir.' \
+  'set -- ./bin/Runner.Listener run --jitconfig "$(cat "$CRF_JITCONFIG_FILE")"' \
+  '# We replaced the entrypoint that used to launch dockerd, so route through the same' \
+  '# wrapper the legacy CMD uses when docker-in-docker is on: without it the first job' \
+  '# step races a cold daemon and fails "Cannot connect to the Docker daemon".' \
+  'if [ "${START_DOCKER_SERVICE:-}" = "true" ] && [ -x /usr/local/bin/wait-docker.sh ]; then' \
+  '  exec /usr/local/bin/wait-docker.sh "$@"' \
+  'fi' \
+  'exec "$@"' \
+  > /usr/local/bin/jit-entrypoint.sh \
+ && chmod 0755 /usr/local/bin/jit-entrypoint.sh
+
 # Health probe so ci-runner-farm can reap a runner whose GitHub registration was
 # removed: its listener then loops forever on "Registration was not found /
 # Retrying until reconnected" instead of exiting, so it never gets recycled and

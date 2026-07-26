@@ -15,3 +15,7 @@
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
 "$PLGDIR/include/runner-farm.sh" autoscale-stop  >/dev/null 2>&1 || true
 "$PLGDIR/include/runner-farm.sh" imageupdate-stop >/dev/null 2>&1 || true
+# `force` skips the scale-set listener's drain: it would otherwise wait
+# SCALESET_DRAIN_TIMEOUT for jobs whose containers Docker is about to terminate
+# anyway, delaying the array stop for nothing.
+"$PLGDIR/include/runner-farm.sh" scaleset-stop force >/dev/null 2>&1 || true

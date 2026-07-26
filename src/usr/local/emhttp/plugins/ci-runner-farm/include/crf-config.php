@@ -34,6 +34,8 @@ $crf_defaults = [
   'DASHBOARD_WIDGET_ENABLE'=>'true',
   'AUTOSCALE'=>'false', 'AUTOSCALE_MIN'=>'2', 'AUTOSCALE_MAX'=>'16', 'AUTOSCALE_MIN_IDLE'=>'2',
   'AUTOSCALE_STEP'=>'2', 'AUTOSCALE_INTERVAL'=>'30', 'AUTOSCALE_IDLE_GRACE'=>'5',
+  'FLEET_MODE'=>'legacy', 'SCALESET_NAME'=>'', 'SCALESET_DRAIN_TIMEOUT'=>'600',
+  'GH_CREDENTIAL'=>'default',
 ];
 
 /* Same fleet-name shape the engine and exec.php enforce. Restated as a constant so a
