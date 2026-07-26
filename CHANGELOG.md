@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/stanvx/ci-runner-farm/compare/v1.9.1...v1.9.2) (2026-07-26)
+
+
+### Bug Fixes
+
+* make plugin config saves durable ([#27](https://github.com/stanvx/ci-runner-farm/issues/27)) ([bdec258](https://github.com/stanvx/ci-runner-farm/commit/bdec2585c3c2afd2c0a7e9015a093075eab9d2ff))
+
 ## [1.9.1](https://github.com/stanvx/ci-runner-farm/compare/v1.9.0...v1.9.1) (2026-07-26)
 
 

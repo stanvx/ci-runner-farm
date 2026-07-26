@@ -2,15 +2,15 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name          "ci-runner-farm">
 <!ENTITY author        "Lime Technology">
-<!ENTITY version       "2026.07.26.1109.13-1.9.1">
-<!ENTITY pluginVersion "1.9.1">
-<!ENTITY releaseTag    "v1.9.1">
+<!ENTITY version       "2026.07.26.1404.15-1.9.2">
+<!ENTITY pluginVersion "1.9.2">
+<!ENTITY releaseTag    "v1.9.2">
 <!ENTITY pluginURL     "https://github.com/stanvx/ci-runner-farm/releases/latest/download/ci-runner-farm.plg">
-<!ENTITY packageName   "ci-runner-farm-2026.07.26.1109.13-1.9.1.tgz">
-<!ENTITY packageURL    "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.1/ci-runner-farm-2026.07.26.1109.13-1.9.1.tgz">
-<!ENTITY packageMD5    "ba02bc1728c3b64670edd42ae35ad6d2">
-<!ENTITY daemonName    "crf-scalesetd-2026.07.26.1109.13-1.9.1">
-<!ENTITY daemonURL     "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.1/crf-scalesetd-2026.07.26.1109.13-1.9.1">
+<!ENTITY packageName   "ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz">
+<!ENTITY packageURL    "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.2/ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz">
+<!ENTITY packageMD5    "d2fb0a05b95d5d2969812820956d6def">
+<!ENTITY daemonName    "crf-scalesetd-2026.07.26.1404.15-1.9.2">
+<!ENTITY daemonURL     "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.2/crf-scalesetd-2026.07.26.1404.15-1.9.2">
 <!ENTITY daemonMD5     "e159723e9195bccac3f7e0cf545072b3">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
@@ -26,7 +26,7 @@
 <CHANGES>
 ### &version;
 ### Bug Fixes
-* make daemon release builds reproducible ([fadbd33](https://github.com/stanvx/ci-runner-farm/commit/fadbd334b6a16a1dbfac93410320cc27a08efc60))
+* make plugin config saves durable ([#27](https://github.com/stanvx/ci-runner-farm/issues/27)) ([bdec258](https://github.com/stanvx/ci-runner-farm/commit/bdec2585c3c2afd2c0a7e9015a093075eab9d2ff))
 </CHANGES>
 
 <!-- plugin package: Unraid downloads it to flash and verifies the MD5 -->
@@ -52,13 +52,13 @@ CFGDIR="/boot/config/plugins/ci-runner-farm"
 mkdir -p "$CFGDIR" "$PLGDIR"
 # Sweep older downloaded assets off flash, keeping this build's package + daemon.
 find "$CFGDIR" -maxdepth 1 \( \
-     -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.07.26.1109.13-1.9.1.tgz' -o \
-     -name 'crf-scalesetd-*'   ! -name 'crf-scalesetd-2026.07.26.1109.13-1.9.1' \
+     -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz' -o \
+     -name 'crf-scalesetd-*'   ! -name 'crf-scalesetd-2026.07.26.1404.15-1.9.2' \
      \) -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
-tar -xzf "$CFGDIR/ci-runner-farm-2026.07.26.1109.13-1.9.1.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
+tar -xzf "$CFGDIR/ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
@@ -69,7 +69,7 @@ chmod 0755 "$PLGDIR/include/runner-farm.sh"
 # The listener arrives as its own <FILE> download, not in the tarball, so it needs
 # its own install + mode: the 0644 pass above only walks what the tarball extracted.
 mkdir -p "$PLGDIR/bin"
-install -m 0755 "$CFGDIR/crf-scalesetd-2026.07.26.1109.13-1.9.1" "$PLGDIR/bin/crf-scalesetd"
+install -m 0755 "$CFGDIR/crf-scalesetd-2026.07.26.1404.15-1.9.2" "$PLGDIR/bin/crf-scalesetd"
 # Config defaults are NOT seeded to flash — the settings page and runner-farm.sh
 # both fall back to built-in defaults, so flash only ever holds what the user set.
 [ -f "$CFGDIR/Dockerfile" ] || cp "$PLGDIR/default.Dockerfile" "$CFGDIR/Dockerfile"
@@ -110,7 +110,7 @@ fi
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$CFGDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
-echo "| ci-runner-farm 2026.07.26.1109.13-1.9.1 installed.                         "
+echo "| ci-runner-farm 2026.07.26.1404.15-1.9.2 installed.                         "
 echo "| Settings > Utilities > CI Runner Farm                        "
 echo "| Set a GitHub PAT, then Start (or Validate without a token).  "
 echo "+=============================================================+"
