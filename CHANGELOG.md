@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/stanvx/ci-runner-farm/compare/v1.9.0...v1.9.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* make daemon release builds reproducible ([fadbd33](https://github.com/stanvx/ci-runner-farm/commit/fadbd334b6a16a1dbfac93410320cc27a08efc60))
+
 ## [1.9.0](https://github.com/stanvx/ci-runner-farm/compare/v1.8.0...v1.9.0) (2026-07-26)
 
 
