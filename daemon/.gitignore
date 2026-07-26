@@ -1,0 +1,4 @@
+# The compiled binary ships as a separate GitHub Release asset, never in the
+# repo and never inside src/ (which is tarred wholesale into the plugin package).
+/crf-scalesetd
+/daemon
