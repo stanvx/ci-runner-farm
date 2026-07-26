@@ -17,6 +17,7 @@
 #                     Defaults to 0 for local dev builds.
 #   DATE              YYYY.MM.DD.HHMM build stamp. Defaults to now (UTC).
 #   REPO              owner/name on GitHub, used for pluginURL + support URL.
+#                     Defaults to this fork; override it when building upstream.
 #
 # The Unraid plugin-manager <version> ("external" version) is
 #   YYYY.MM.DD.HHMM.BUILD-INTERNAL  e.g. 2026.06.24.1530.42-0.1.0
@@ -31,7 +32,7 @@ OUT="${NAME}.plg"
 SRCDIR="src/usr/local/emhttp/plugins/${NAME}"
 TGZ="${NAME}.tgz"
 DAEMON="crf-scalesetd"
-REPO="${REPO:-unraid/ci-runner-farm}"
+REPO="${REPO:-stanvx/ci-runner-farm}"
 
 # Unquoted on purpose everywhere it is used: GO may carry a wrapper prefix, e.g.
 # GO='mise exec -- go' on a dev box where plain `go` is not on PATH.

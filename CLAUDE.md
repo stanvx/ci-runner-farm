@@ -109,9 +109,9 @@ This is a fork. `origin` is `stanvx/ci-runner-farm`; the parent is
 upstream.** `gh repo set-default stanvx/ci-runner-farm` is already configured, so
 `gh pr create` resolves here — but pass `--repo stanvx/ci-runner-farm` explicitly
 if there is any doubt, and never `--base` a branch on the parent. Same for
-issues. `build-plg.sh` defaults `REPO=unraid/ci-runner-farm`; set
-`REPO=stanvx/ci-runner-farm` when building a fork release so the plugin URLs
-point here.
+issues. `build-plg.sh` defaults `REPO=stanvx/ci-runner-farm`; set
+`REPO=unraid/ci-runner-farm` only when intentionally building the upstream
+repository so the plugin URLs point at the intended release assets.
 
 Conventional commits (release-please depends on them), scoped e.g. `feat(ui):`,
 `fix(autoscale):`. PR-based, squash-merged, linear history. Actions are SHA-pinned

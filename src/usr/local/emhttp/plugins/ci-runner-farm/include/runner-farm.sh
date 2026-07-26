@@ -159,6 +159,15 @@ GH_CREDENTIAL="default"              # NAME of a credential set under credential
                                      # an upgraded install keeps working without writing anything.
 # ----------------------------------------------------------------------------
 
+# Hand-edited cfg values are strings, so `${value:-default}` is not enough: `15m`
+# reaches arithmetic and test expressions as a fatal error under `set -u`.
+timeout_value() {
+  case "${1:-}" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # Allowlist of keys the settings page may set, split into the two layers a fleet is
 # assembled from. GLOBAL_KEYS describe the box (one mirror, one cache root, one host
 # `docker login`) and are read from the legacy cfg path whatever fleet is current;
@@ -530,7 +539,8 @@ scaleset_stop() {
   # second listener onto the same scale set, and the still-draining one would force-remove
   # the containers the new one had just provisioned. Wait it out, bounded, then SIGKILL —
   # a wedged listener must not block Start forever either.
-  local waited=0 limit=$(( ${SCALESET_DRAIN_TIMEOUT:-600} + 30 ))
+  local waited=0 limit
+  limit=$(( $(timeout_value "${SCALESET_DRAIN_TIMEOUT:-}" 600) + 30 ))
   while pgrep -f "$pat" >/dev/null 2>&1; do
     if [ "$waited" -ge "$limit" ]; then
       err "scale-set listener for fleet $FLEET still alive ${limit}s after SIGTERM — killing it"
@@ -595,7 +605,7 @@ imageupdate_pull() {
 # IMAGE_DRAIN_TIMEOUT, leave it on the old image — the next cycle retries.
 drain_and_recreate() {
   local c="$1" waited=0 idx limit
-  limit="${IMAGE_DRAIN_TIMEOUT:-3600}"
+  limit="$(timeout_value "${IMAGE_DRAIN_TIMEOUT:-}" 3600)"
   # Wait for the runner to finish its job WITHOUT holding the fleet lock across the
   # (up to IMAGE_DRAIN_TIMEOUT — hours) idle-wait. fd 8 is the fleet mutex, held by our
   # with_fleet_lock caller; we hand it back during each sleep and re-take it only to
@@ -1451,9 +1461,10 @@ cmd_reconcile_drain() {
   # fd 8) so our own `with_fleet_lock wait` below isn't self-blocked. Keep fd 7 — the
   # dispatch wrapper holds it as this drain's own reconcile.lock. See autoscale_daemon.
   { exec 8>&- 9>&-; } 2>/dev/null || true
-  local deadline announced=0 lost
+  local deadline announced=0 lost image_timeout
+  image_timeout="$(timeout_value "${IMAGE_DRAIN_TIMEOUT:-}" 3600)"
   rm -f "$RECONCILE_SHRINK"                  # fresh tally of runners lost this drain (see reconcile_stale_runners)
-  deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  deadline=$(( $(date +%s) + image_timeout ))
   while :; do
     load_cfg
     [ -z "$ACCESS_TOKEN" ] && [ -f "$TOKEN_FILE" ] && ACCESS_TOKEN="$(cat "$TOKEN_FILE" 2>/dev/null)"
@@ -1463,7 +1474,7 @@ cmd_reconcile_drain() {
     [ "$(count_stale_runners)" -eq 0 ] && break
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), so only enforce
     # the deadline when it's positive — matching drain_and_recreate's `limit -gt 0` guard.
-    [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout (finishing jobs or wedged in startup) — they'll migrate on their next idle, or Restart the fleet to force it now"; break; }
+    [ "$image_timeout" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && { log "reconcile: $(count_stale_runners) runner(s) still on the old config after the drain timeout (finishing jobs or wedged in startup) — they'll migrate on their next idle, or Restart the fleet to force it now"; break; }
     sleep 15
   done
   lost="$([ -f "$RECONCILE_SHRINK" ] && grep -c . "$RECONCILE_SHRINK" 2>/dev/null || echo 0)"
@@ -2515,7 +2526,7 @@ cmd_fleet_drain_rename() {
   # Grouped: an ungrouped `exec ... 2>/dev/null` makes the redirect permanent and every
   # err() below (rename target missing, drain timeout) would vanish for the whole handover.
   { exec 6>&- 8>&- 9>&-; } 2>/dev/null || true
-  local target deadline cap c want retired scaleset=0
+  local target deadline cap c want retired scaleset=0 image_timeout
   target="$(drain_target)"
   [ -n "$target" ] || { err "fleet $FLEET is not being renamed"; return 1; }
   [ -f "$(cfg_path "$target")" ] || { err "rename target $target has no config — leaving fleet $FLEET as it is"; return 1; }
@@ -2533,7 +2544,8 @@ cmd_fleet_drain_rename() {
   # Match cmd_start's sizing rule so the new fleet lands on the size it would have been
   # started at, not RUNNER_COUNT while autoscaling wants the floor.
   cap="$RUNNER_COUNT"; [ "$AUTOSCALE" = "true" ] && cap="$AUTOSCALE_MIN"
-  deadline=$(( $(date +%s) + ${IMAGE_DRAIN_TIMEOUT:-3600} ))
+  image_timeout="$(timeout_value "${IMAGE_DRAIN_TIMEOUT:-}" 3600)"
+  deadline=$(( $(date +%s) + image_timeout ))
   while [ "$(managed_names | grep -c .)" -gt 0 ]; do
     retired=0
     for c in $(managed_names | sort -rV); do
@@ -2556,7 +2568,7 @@ cmd_fleet_drain_rename() {
     # IMAGE_DRAIN_TIMEOUT=0 means "wait forever" (per the settings help), matching
     # cmd_reconcile_drain. On timeout BOTH fleets are left intact and valid — the
     # handover resumes on the next Start or boot (see cmd_start).
-    [ "${IMAGE_DRAIN_TIMEOUT:-3600}" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && {
+    [ "$image_timeout" -gt 0 ] && [ "$(date +%s)" -ge "$deadline" ] && {
       log "fleet $FLEET -> $target: $(managed_names | grep -c .) runner(s) still busy after the drain timeout — fleet $FLEET stays up; Start it again or reboot to resume the handover"
       return 0
     }

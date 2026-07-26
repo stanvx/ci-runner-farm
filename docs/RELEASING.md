@@ -122,16 +122,17 @@ tagging instead, but review that diff rather than trusting a green PR.
 
 This repository is `stanvx/ci-runner-farm`, a fork. Releases are distributed by
 URL from this repo's GitHub Releases only — Community Applications is not part of
-this fork's distribution, and `community-applications/` is upstream listing
-material.
+this fork's current distribution. The optional `community-applications/` metadata
+also points at this fork, but does not make the plugin CA-listed.
 
 `REPO` defaults to `${{ github.repository }}` in CI, so releases cut here build
-`stanvx` URLs automatically. Local builds do not: `build-plg.sh` falls back to
-`unraid/ci-runner-farm`. Pass `REPO=stanvx/ci-runner-farm` when building a `.plg`
-by hand, or it will advertise upstream's release assets.
+`stanvx` URLs automatically. Local `build-plg.sh` builds use the same fork by
+default; set `REPO=unraid/ci-runner-farm` only when intentionally building the
+upstream repository.
 
-The committed `.plg` still carries upstream URLs until the first release is cut
-here; the release job rewrites them.
+The committed `.plg` must point at `stanvx/ci-runner-farm` before publishing. The
+release job regenerates those URLs from `github.repository`; inspect them on the
+release PR rather than assuming a fork inherited the correct owner.
 
 Two repository settings must be enabled on a fork before release automation works:
 

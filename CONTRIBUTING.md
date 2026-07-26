@@ -41,10 +41,10 @@ Add all three, or add the key to `ENGINE_ONLY_IN_CFG` in
 ./deploy.sh root@tower         # fast iteration on a dev Unraid host
 ```
 
-`deploy.sh` copies a hand-listed subset of files, not the whole tree. Install the
-built `.plg` to test anything it does not cover. Do not commit a locally built
-`.plg` — it is generated during the release and is only byte-reproducible under
-GNU tar.
+`deploy.sh` copies the source text runtime only; it does not install the
+release-only `crf-scalesetd` binary. Install the built `.plg` to test the complete
+plugin, especially scale-set mode. Do not commit a locally built `.plg` — it is
+generated during the release and is only byte-reproducible under GNU tar.
 
 ## Commits and pull requests
 

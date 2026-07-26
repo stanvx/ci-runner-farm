@@ -154,6 +154,10 @@ $host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec(
      here — a duplicate later in document order would win the cascade and silently
      mask edits to the shared source. Only Fleet-specific selectors belong below. */
   .crf-right{text-align:right}
+  #crf-cfg [data-key="GH_CREDENTIAL"] dd{display:flex;align-items:center;gap:6px}
+  #crf-cfg [data-key="GH_CREDENTIAL"] dd input{flex:1}
+  .crf-credential-test{flex:0 0 auto;padding:3px 10px;border:1px solid var(--border-color);border-radius:4px;background:var(--shade-bg-color,transparent);color:var(--text-color);cursor:pointer}
+  .crf-credential-test:disabled{opacity:.55;cursor:wait}
   /* Health colours. Colour carries HEALTH ONLY — mode is a badge with no colour of
      its own, so "legacy" never reads as a warning. */
   .crf-h-healthy{background:var(--crf-ok)}
@@ -518,8 +522,25 @@ function crfCfgLoad(){
     const cfg=d.cfg||{};
     CRF_CFG_KEYS.forEach(k=>{ const el=crfCfgEl(k); if(el) el.value=(k in cfg)?cfg[k]:(CRF_DEFAULTS[k]??''); });
     const lbl=document.getElementById('crf-cfg-for'); if(lbl) lbl.textContent=d.fleet;
-    fs.disabled=false; crfCfgAdvise();
+    fs.disabled=false; crfCfgCredentialButton(); crfCfgAdvise();
   }).catch(e=>{ if(e&&e.__crfStale) return; console.error('ci-runner-farm get-config:',e); });
+}
+function crfCfgCredentialButton(){
+  const row=document.querySelector('#crf-cfg [data-key="GH_CREDENTIAL"]'), dd=row&&row.querySelector('dd');
+  if(!dd||dd.querySelector('.crf-credential-test')) return;
+  const b=document.createElement('button'); b.type='button'; b.className='crf-credential-test'; b.textContent='Test';
+  b.addEventListener('click',crfCfgCheckCredential); dd.appendChild(b);
+}
+function crfCfgCheckCredential(){
+  const input=crfCfgEl('GH_CREDENTIAL'), b=document.querySelector('.crf-credential-test'), name=input&&input.value.trim();
+  if(!name){ crfToast('Enter a credential name first'); return; }
+  if(b){ b.disabled=true; b.textContent='Checking…'; }
+  crfPost({action:'check-credential',name}).then(o=>{
+    if(o.ok===false){ crfToast('Credential check failed'+(o.error?': '+o.error:'')); return; }
+    const who=o.account||'unknown account', kind=o.type==='app'?'GitHub App':'PAT';
+    crfToast('Credential valid: '+who+' ('+kind+')');
+  }).catch(e=>{ crfToast('Credential check failed'); console.error('ci-runner-farm check-credential:',e); })
+    .finally(()=>{ if(b){ b.disabled=false; b.textContent='Test'; } });
 }
 function crfCfgSave(){
   const cfg={};

@@ -17,6 +17,7 @@ if (!$csrf || !hash_equals($csrf, $given)) {
 $PLUGIN  = 'ci-runner-farm';
 $CFGDIR  = "/boot/config/plugins/$PLUGIN";
 $SCRIPT  = "/usr/local/emhttp/plugins/$PLUGIN/include/runner-farm.sh";
+$DAEMON  = "/usr/local/emhttp/plugins/$PLUGIN/bin/crf-scalesetd";
 $action  = $_REQUEST['action'] ?? 'status-json';
 
 // Which fleet this request is for. Same regex the engine enforces — validate here too
@@ -133,6 +134,21 @@ switch ($action) {
   case 'clear-registry-token':
     @unlink("$CFGDIR/registry-token");
     echo json_encode(['ok' => true, 'action' => 'clear-registry-token']);
+    break;
+
+  case 'check-credential':
+    $name = trim($_REQUEST['name'] ?? '');
+    if (!preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
+      echo json_encode(['ok'=>false,'error'=>'bad credential name']); break;
+    }
+    if (!is_executable($DAEMON)) {
+      echo json_encode(['ok'=>false,'error'=>'credential checker is not installed']); break;
+    }
+    [$out, $rc] = run(escapeshellarg($DAEMON) . ' check-credential ' . escapeshellarg($name));
+    $report = json_decode($out, true);
+    echo $rc === 0 && is_array($report)
+      ? json_encode(array_merge(['ok'=>true], $report))
+      : json_encode(['ok'=>false,'error'=>trim($out) ?: 'credential check failed']);
     break;
 
   case 'get-dockerfile':
