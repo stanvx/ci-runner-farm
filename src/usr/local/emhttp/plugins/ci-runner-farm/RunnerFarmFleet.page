@@ -18,7 +18,6 @@ Tag="server"
   <div id="crf-rail-body"></div>
 </nav>
 <section class="crf-main">
-<div id="crf-sec" class="crf-banner crf-banner-sec" style="display:none"></div>
 <div id="crf-warn" class="crf-banner crf-banner-warn" style="display:none"></div>
 <div id="crf-migrate" class="crf-banner crf-banner-info" style="display:none"></div>
 <div id="crf-drain" class="crf-banner crf-banner-info" style="display:none"></div>
@@ -42,26 +41,49 @@ Tag="server"
   </div>
 </div>
 
-<div class="crf-stats" id="crf-stats">
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Runners up</span><span class="crf-stat-value" id="crf-s-up">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Busy</span><span class="crf-stat-value crf-c-busy" id="crf-s-busy">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Idle</span><span class="crf-stat-value crf-c-ok" id="crf-s-idle">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Queued</span><span class="crf-stat-value" id="crf-s-q">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Autoscale</span><span class="crf-stat-small" id="crf-s-as">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Image update</span><span class="crf-stat-small" id="crf-s-iu">&ndash;</span></div></uui-card-wrapper>
-  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner"><span class="crf-stat-label">Cache</span><span class="crf-stat-value" id="crf-s-cache">&ndash;</span><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></div></uui-card-wrapper>
-</div>
+<!-- Security posture, above the metrics: a fleet whose cache root cannot hold Docker
+     data, or whose privileged runners face public repos, is a worse fact than any
+     number of runners being up. CALCULATED from what the engine observed, never a
+     stored verdict the operator could disagree with. -->
+<div id="crf-posture" class="crf-posture crf-p-unknown"><b>Checking&hellip;</b></div>
 
-<!-- Start/Stop/Restart/Validate moved into the identity header's primary action and
-     overflow; only the scale control stays inline with the runner bays it changes. -->
-<div class="crf-toolbar">
-  <span class="crf-scale">Scale to <input type="number" id="crf-n" min="0" max="20" value="4">
-  <uui-button variant="secondary" size="xs" onclick="crfScale()">Scale</uui-button></span>
+<!-- Each card's JS writes textContent into named spans and flips [hidden]; it never
+     rewrites a card's innerHTML. The scale input lives inside Capacity, and a 5s
+     re-render would destroy that node under the operator's focus and half-typed number. -->
+<div class="crf-stats" id="crf-stats">
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner">
+    <span class="crf-stat-label">Capacity</span>
+    <span class="crf-stat-value" id="crf-cap-v">&ndash;</span>
+    <span class="crf-stat-small crf-muted" id="crf-cap-s"></span>
+    <!-- Capacity mode is CONFIGURATION, not a measurement, so it sits below the rule
+         with the control that changes it rather than posing as a seventh metric. -->
+    <span class="crf-stat-x">
+      <span id="crf-cap-mode">&ndash;</span>
+      <span class="crf-scale">Scale to <input type="number" id="crf-n" min="0" max="20" value="4"
+        title="Sets the fleet size now. With automatic capacity on, the autoscale daemon will re-adjust within its bounds on its next pass.">
+      <uui-button variant="secondary" size="xs" onclick="crfScale()">Scale</uui-button></span>
+    </span>
+    <span class="crf-stat-x crf-c-busy" id="crf-cap-dead" hidden>Autoscale is enabled but its daemon is not running.</span>
+    <span class="crf-stat-x crf-muted" id="crf-cap-iu"></span>
+  </div></uui-card-wrapper>
+
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner">
+    <span class="crf-stat-label">Queue</span>
+    <span class="crf-stat-value" id="crf-q-v">&ndash;</span>
+    <span class="crf-stat-small crf-muted" id="crf-q-s"></span>
+  </div></uui-card-wrapper>
+
+  <uui-card-wrapper class="crf-stat"><div class="crf-stat-inner">
+    <span class="crf-stat-label">Storage</span>
+    <span class="crf-stat-value" id="crf-st-v">&ndash;</span>
+    <span class="crf-stat-small crf-muted" id="crf-st-s"></span>
+    <span class="crf-stat-x"><a class="crf-cache-clear" id="crf-cache-clear" href="javascript:void(0)" role="button" onclick="crfCacheClear()">Clear caches</a></span>
+  </div></uui-card-wrapper>
 </div>
 
 <div class="crf-bays">
   <div class="crf-bay crf-bay-head">
-    <span></span><span>Runner</span><span>Phase</span><span>Job</span><span>CPU</span><span>Memory</span><span></span>
+    <span></span><span>Runner</span><span>State</span><span>Repository / job</span><span>CPU</span><span>Memory</span><span></span>
   </div>
   <div id="crf-bays-body"><div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div></div>
 </div>
@@ -126,7 +148,19 @@ Tag="server"
     .crf-shell{flex-direction:column}
     .crf-rail{flex:1 1 auto;width:100%;box-sizing:border-box}
   }
-  .crf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin:6px 0 8px}
+  /* Security posture. The left border carries the level; the fill is a colour-mix
+     tint so it survives every Unraid theme without a per-theme override. The grey
+     "not checked" third state is one neither banner could express. */
+  .crf-posture{margin:0 0 10px;padding:10px 12px;border:1px solid var(--border-color);border-left-width:3px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--text-color)}
+  .crf-p-attn{border-left-color:var(--crf-busy);background:color-mix(in srgb,var(--crf-busy) 9%,var(--background-color))}
+  .crf-p-clear{border-left-color:var(--crf-ok);background:color-mix(in srgb,var(--crf-ok) 7%,var(--background-color))}
+  .crf-p-unknown{border-left-color:var(--disabled-text-color,#888)}
+  .crf-pf{margin-top:4px}
+  .crf-stat-x{margin-top:7px;padding-top:6px;border-top:1px solid var(--table-border-color,var(--border-color));display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:12px;color:var(--alt-text-color)}
+  .crf-stat-x + .crf-stat-x{margin-top:4px;padding-top:0;border-top:none}
+  .crf-stat-x[hidden]{display:none}
+  /* 110px -> 230px: three cards with sentences in them, not seven number tiles. */
+  .crf-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin:6px 0 8px}
   .crf-stat-inner{display:flex;flex-direction:column;gap:2px;padding:0}
   uui-card-wrapper.crf-stat:not(:defined){background:var(--shade-bg-color,var(--table-header-background-color));border:1px solid var(--border-color);border-radius:6px;display:block;padding:10px 14px}
   .crf-stat-label{font-size:12px;color:var(--alt-text-color);letter-spacing:.01em}
@@ -139,19 +173,26 @@ Tag="server"
   .crf-runstats{display:flex;align-items:center;gap:16px;flex-wrap:wrap;border:1px solid var(--border-color);border-radius:6px;background:var(--shade-bg-color,transparent);padding:8px 14px;margin:0 0 8px;font-size:13px;color:var(--text-color)}
   .crf-rs-title{font-size:11px;color:var(--alt-text-color);letter-spacing:.03em}
   .crf-rs-seg b{font-weight:500}
-  .crf-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px}
-  .crf-scale{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--alt-text-color);font-size:13px}
+  /* No margin-left:auto — that belonged to the deleted toolbar row; inside the
+     Capacity footer the control sits next to the mode it re-adjusts. */
+  .crf-scale{display:flex;align-items:center;gap:6px;color:var(--alt-text-color);font-size:13px}
   .crf-scale input[type=number]{width:4em;height:26px;box-sizing:border-box;border-radius:6px;padding:0 8px;font-size:12px;margin:0}
   .crf-bays{border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:0 0 8px}
-  .crf-bay{display:grid;grid-template-columns:22px minmax(110px,1fr) 88px minmax(120px,1.6fr) 120px 160px 26px;gap:8px;align-items:center;padding:4px 10px;border-top:1px solid var(--table-border-color,var(--border-color))}
+  .crf-bay{display:grid;grid-template-columns:22px minmax(110px,1fr) 92px minmax(180px,2.2fr) 110px 150px 26px;gap:8px;align-items:center;padding:4px 10px;border-top:1px solid var(--table-border-color,var(--border-color))}
   .crf-bay:first-child{border-top:none}
   .crf-bay-head{background:var(--table-header-background-color);font-size:11px;color:var(--alt-text-color);padding:5px 10px}
   #crf-bays-body .crf-bay:hover{background:var(--hover-table-row-background-color)}
   .crf-name{font-family:bitstream,monospace;font-size:13px;color:var(--text-color)}
-  .crf-job{font-size:12px;color:var(--alt-text-color);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .crf-job a{color:var(--alt-text-color);text-decoration:none}
+  .crf-state{font-size:12px;color:var(--text-color)}
+  /* Two lines now, so the ellipsis moves onto each line instead of onto the cell. */
+  .crf-job{font-size:12px;line-height:1.35;min-width:0;overflow:hidden}
+  .crf-job a{text-decoration:none}
   .crf-job a:hover{color:var(--link-text-color);text-decoration:underline}
-  .crf-repo{color:var(--text-color)}
+  /* The repository is the row's identity, not a muted afterthought — the link that
+     wraps it inherits text colour rather than the old cell-wide alt colour. */
+  .crf-repo{display:block;color:var(--text-color);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crf-repo a{color:var(--text-color)}
+  .crf-job-m{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .crf-ref{font-size:11px;border:1px solid var(--border-color);border-radius:8px;padding:0 6px;margin-left:6px;color:var(--link-text-color);text-decoration:none;white-space:nowrap}
   .crf-ref:hover{border-color:var(--link-text-color)}
   .crf-usage{display:flex;align-items:center;gap:6px;min-width:0}
@@ -168,7 +209,7 @@ Tag="server"
   .crf-recycle:hover{color:var(--crf-busy)}
   #crf-bays-body .crf-bay:focus-visible,.crf-recycle:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px;border-radius:4px}
   @media (max-width:860px){
-    .crf-bay{grid-template-columns:22px minmax(80px,1fr) 74px minmax(70px,1.3fr) 26px}
+    .crf-bay{grid-template-columns:22px minmax(80px,1fr) 80px minmax(90px,1.3fr) 26px}
     .crf-bay > :nth-child(5),.crf-bay > :nth-child(6){display:none}
     .crf-stat-value{font-size:20px}
   }
@@ -292,7 +333,17 @@ function crfSelectFleet(name){
   // than showing another fleet's numbers under this fleet's name for one poll.
   window.CRF_LAST=null; window.CRF_CACHE=null;
   window.CRF_DRAWER=null; window.CRF_DRAWER_HTML=''; window.CRF_DRAWER_SCROLL=0; window.CRF_DRAWER_PINNED=true;
+  window.CRF_QUEUED=undefined; window.CRF_QUEUED_AGE=undefined; window.CRF_UP=0;
   crfUserLog=false;
+  // Nulling the caches alone leaves the PREVIOUS fleet's figures painted under the
+  // new fleet's name — the queue and storage cards only repaint on their own 30s
+  // pollers, so blank them by hand rather than waiting.
+  ['crf-cap-v','crf-q-v','crf-st-v'].forEach(i=>{const e=document.getElementById(i); if(e) e.textContent='–';});
+  ['crf-cap-s','crf-q-s','crf-st-s','crf-cap-mode','crf-cap-iu'].forEach(i=>{const e=document.getElementById(i); if(e) e.textContent='';});
+  const cd=document.getElementById('crf-cap-dead'); if(cd) cd.hidden=true;
+  const cc=document.getElementById('crf-cache-clear'); if(cc) cc.title='';
+  const po=document.getElementById('crf-posture');
+  if(po){ po.className='crf-posture crf-p-unknown'; po.innerHTML='<b>Checking…</b>'; }
   const tb=document.getElementById('crf-bays-body');
   if(tb){ tb.__crfSig=null; tb.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div>'; }
   crfRenderRail(); crfRenderIdentity();
@@ -350,6 +401,56 @@ function crfVolatile(r){
   const memTxt=memKnown?((r.mem_used_mib>=1024?( (r.mem_used_mib/1024).toFixed(1)+'g'):(r.mem_used_mib+'m'))+'/'+r.mem_gb+'g'):(running?'…':'&ndash;');
   return {elapsedHtml,cpuPct,cpuTxt,memPct,memTxt};
 }
+/* Security posture, recomputed on every status poll. Every line is something the
+   engine actually OBSERVED on this box, never a stored verdict the operator could
+   disagree with. Only two checks are derivable today: SEC_CACHE's public-repo
+   verdict and WARN_CACHE's cache-root verdict. The runner-privilege / isolation /
+   ephemeral checks need FLEET_KEYS that status-json does not carry, and PHP here
+   can only read fleet `default`'s config (parse_plugin_cfg reads the legacy path,
+   and the selected fleet lives in localStorage, which PHP has not been told).
+   d.token is a GATE, not a finding: public_repo_problem() returns before it asks
+   GitHub when there is no token (runner-farm.sh:732), so an empty `security` on a
+   tokenless fleet means "never asked", and calling that clear would be a lie. */
+function crfPosture(d){
+  const el=document.getElementById('crf-posture'); if(!el) return;
+  const f=[];
+  if(d.security) f.push(['Public repositories',d.security]);
+  if(d.warning) f.push(['Cache root',d.warning]);
+  let lvl,title,body;
+  if(f.length){
+    lvl='attn';
+    title=d.security?'Security needs attention':'Configuration needs attention';
+    // These sentences interpolate GH_REPOS and CACHE_ROOT — operator-controlled text
+    // reaching the DOM through innerHTML, so crfEsc here is load-bearing, not decoration.
+    // They already carry their own remediation, so nothing summarises them into a clause.
+    body=f.map(x=>'<div class="crf-pf"><b>'+x[0]+'</b> '+crfEsc(x[1])+'</div>').join('');
+  } else if(d.token===false){
+    lvl='unknown'; title='Security · not checked';
+    body='<div class="crf-pf crf-muted">The public-repository check needs a GitHub token, and this fleet has none. Add one on the Settings tab.</div>';
+  } else {
+    // Deliberately does NOT name what was checked. An empty `security` also means the
+    // check DECLINED to run — public_repo_problem returns before asking GitHub when
+    // GH_SCOPE is not `repo` or the runners are neither DinD nor socket-mounted
+    // (runner-farm.sh:729-731) — and SEC_CACHE lives in tmpfs, so it is empty after
+    // every reboot, and an all-curls-failed run caches an empty verdict for 300s.
+    // status-json carries none of those distinctions, so "Checked: X" would be a
+    // claim the engine cannot back, and a green tick is the worst place to guess.
+    lvl='clear'; title='Nothing reported';
+    body='<div class="crf-pf crf-muted">No public-repository or cache-root problem has been reported for this fleet. The rest of its security settings live on the Settings tab.</div>';
+  }
+  el.className='crf-posture crf-p-'+lvl;
+  el.innerHTML='<b>'+title+'</b>'+body;
+}
+const CRF_PHASE_LABEL={busy:'Busy',idle:'Idle',error:'Error',starting:'Starting'};
+/* The engine's vocabulary, not a prettier one: the fleet log and the drawer speak
+   these words, and there is no equivalent of `error` in a lifecycle-flavoured set.
+   "exited" is the one exception — that is docker's word for the container, not a
+   state the operator asked for, so it renders as Stopped. */
+function crfStateLabel(r){
+  if(r.state==='running') return CRF_PHASE_LABEL[r.phase]||r.phase;
+  const s=String(r.state||'unknown');
+  return s==='exited'?'Stopped':s.charAt(0).toUpperCase()+s.slice(1);
+}
 function crfRefresh(){
   // In-flight guard: never stack a new status poll while the previous is still
   // outstanding, so a slow backend can't spiral into overlapping polls.
@@ -357,10 +458,13 @@ function crfRefresh(){
   window.__crfBusyStatus=true;
   crfPost({action:'status-json'}).then(d=>{
     window.CRF_LAST=d;
+    // #crf-warn is now a TRANSPORT channel only — the cache-root warning moved into
+    // the posture block. This explicit clear is the only writer left, so a dropped
+    // poll's "Lost connection" cannot pin itself to the page forever now that the
+    // d.warning branch that used to hide it is gone.
     const warn=document.getElementById('crf-warn');
-    if(warn){ if(d.warning){ warn.textContent='⚠ '+d.warning; warn.style.display='block'; } else { warn.textContent=''; warn.style.display='none'; } }
-    const sec=document.getElementById('crf-sec');
-    if(sec){ if(d.security){ sec.textContent='🔒 '+d.security; sec.style.display='block'; } else { sec.textContent=''; sec.style.display='none'; } }
+    if(warn&&warn.style.display!=='none'){ warn.textContent=''; warn.style.display='none'; }
+    crfPosture(d);
     // Runners still on a previous baked config after a settings change — the reconciler
     // recycles them onto the new config as they go idle (busy jobs finish first).
     const mig=document.getElementById('crf-migrate');
@@ -370,13 +474,36 @@ function crfRefresh(){
     const busy=rs.filter(r=>r.state==='running'&&r.phase==='busy').length;
     const idle=rs.filter(r=>r.state==='running'&&r.phase==='idle').length;
     const put=(id,v)=>{const el=document.getElementById(id); if(el) el.textContent=v;};
-    put('crf-s-up',up); put('crf-s-busy',busy); put('crf-s-idle',idle);
     // The identity header shows this fleet's health, and status-json is 6x fresher
     // than the fleet list — fold the live counts in so the header can't sit on a
     // stale "Stopped" for half a minute after a Start.
     const me=window.CRF_FLEETS.find(x=>x.name===crfFleet());
     if(me){ me.running=up; me.configured=d.configured??me.configured; crfRenderIdentity(); crfRenderRail(); }
-    put('crf-s-as',d.autoscale||'off'); put('crf-s-iu',d.image_autoupdate||'off');
+    // The engine ships `autoscale` as one pre-formatted string: "off" or
+    // autoscale_status() ("running (pid N)" / "stopped"), with "[MIN-MAX, buffer N]"
+    // appended in EVERY case (runner-farm.sh:1934) — so test the prefix, never equality.
+    // The bounds are reformatted and the pid dropped: a process id is developer output,
+    // and daemon liveness is already said in words by #crf-cap-dead below. The bounds
+    // are NOT turned into an "up / MAX" denominator — RUNNER_COUNT is not a ceiling
+    // under autoscale, and a second denominator would contradict the identity header's
+    // "N of M runners" one line above.
+    const as=String(d.autoscale||'off'), autoOn=!/^off\b/.test(as);
+    const asb=as.match(/\[(\d+)-(\d+), buffer (\d+)\]/);
+    put('crf-cap-v', autoOn ? up+' online' : up+' / '+(d.configured??0)+' online');
+    put('crf-cap-s', busy+' busy · '+idle+' idle');
+    put('crf-cap-mode','Capacity: '+(autoOn
+      ? ('Automatic'+(asb?' · '+asb[1]+' minimum · '+asb[2]+' maximum · '+asb[3]+' warm':''))
+      : ('Manual · desired '+(d.configured??0))));
+    // AUTOSCALE=true with a dead daemon means the fleet stopped growing — a degraded
+    // state that reads as nothing more than the word "stopped" inside that string.
+    const dead=document.getElementById('crf-cap-dead');
+    if(dead) dead.hidden=!(autoOn&&/^stopped\b/.test(as));
+    // Image auto-update keeps a home here (variant D drops it entirely): it carries
+    // daemon liveness the toggle on Settings cannot, and the two background daemons
+    // that resize the fleet belong together.
+    // Same treatment: imageupdate_status() embeds a pid the operator has no use for.
+    put('crf-cap-iu','Image auto-update: '+String(d.image_autoupdate||'off').replace(/\s*\(pid \d+\)/,''));
+    window.CRF_UP=up; crfRenderQueue();
     const tb=document.getElementById('crf-bays-body'); if(!tb) return;
     // Capture the open drawer's LIVE scroll before the rebuild below destroys the
     // node, so crfDrawerMount can restore the user's position (not snap to tail).
@@ -388,17 +515,16 @@ function crfRefresh(){
         '<uui-button size="sm"'+(crfDark()?' class="dark"':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
       return;
     }
-    const dark=crfDark()?' class="dark"':'';
-    // In-place fast-path: rebuilding crf-bays-body's innerHTML every 5s recreates every
-    // <uui-badge> web component and drops keyboard focus / text selection on each poll.
+    // In-place fast-path: rebuilding crf-bays-body's innerHTML every 5s drops keyboard
+    // focus / text selection on each poll.
     // Most polls are steady-state — same runners and jobs, only CPU/mem/elapsed ticking —
     // so when the STRUCTURE is unchanged we refresh just those volatile cells in place and
     // leave the rows (and the open drawer sibling) alive. Any structural change (runner
-    // added/removed, phase flip, new job, theme or drawer toggle) changes the signature
+    // added/removed, phase flip, new job, drawer toggle) changes the signature
     // and falls through to the full rebuild below. busy-with-job_started is in the
     // signature so the .crf-elapsed span's presence always matches what the row was built
     // with — the in-place branch can then update it without ever needing to create it.
-    const sig=JSON.stringify([dark,window.CRF_DRAWER,rs.map(r=>[r.name,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
+    const sig=JSON.stringify([window.CRF_DRAWER,rs.map(r=>[r.name,r.state,r.phase,r.job,r.repo,r.run_id,r.pr,r.branch,r.cpus,r.mem_gb,r.state==='running'&&r.phase==='busy'&&!!r.job_started])]);
     if(tb.__crfSig===sig && tb.querySelector('.crf-bay[data-name]')){
       rs.forEach(r=>{
         const row=tb.querySelector('.crf-bay[data-name="'+(window.CSS&&CSS.escape?CSS.escape(r.name):r.name)+'"]'); if(!row) return;
@@ -415,29 +541,36 @@ function crfRefresh(){
     tb.__crfSig=sig;
     tb.innerHTML=rs.map(r=>{
       const running=r.state==='running';
-      const ph=running?r.phase:'exited';
       const ball=running?('crf-ball-'+r.phase):'crf-ball';
-      const bvar=ph==='busy'?'orange':ph==='idle'?'green':ph==='error'?'red':'gray';
-      let jobHtml;
+      let repoHtml='\u2014', metaHtml;
       const v=crfVolatile(r);
       if(running&&r.phase==='busy'){
-        const repoShort=r.repo?crfEsc(String(r.repo).split('/').pop()):'';
-        const runOk=/^\d+$/.test(r.run_id||'');
-        const jobTxt=crfEsc(r.job||'\u2014');
-        const core=(repoShort?'<span class="crf-repo" title="'+crfEsc(r.repo)+'">'+repoShort+'</span> \u00b7 ':'')+jobTxt;
-        jobHtml=(runOk&&r.repo)?'<a href="https://github.com/'+crfEsc(r.repo)+'/actions/runs/'+r.run_id+'" target="_blank" rel="noopener" title="open run">'+core+'</a>':core;
-        if(/^\d+$/.test(r.pr||'')&&r.repo) jobHtml+='<a class="crf-ref" href="https://github.com/'+crfEsc(r.repo)+'/pull/'+r.pr+'" target="_blank" rel="noopener">#'+r.pr+'</a>';
-        else if(r.branch) jobHtml+='<span class="crf-ref">'+crfEsc(r.branch)+'</span>';
-        jobHtml+=v.elapsedHtml;
+        // repo/pr/branch/run_id are scraped from the job process environ, and the engine
+        // only populates them for a BUSY runner (runner-farm.sh:1851) \u2014 any other state
+        // renders the dash rather than a stale last value.
+        const repoTxt=crfEsc(r.repo||''), runOk=/^\d+$/.test(r.run_id||'');
+        // The full owner/name now owns its own line instead of being truncated to the
+        // last path segment; the link moves up onto it so the job name below stays
+        // plain text and stays readable when it is long.
+        if(r.repo) repoHtml=runOk
+          ? '<a href="https://github.com/'+repoTxt+'/actions/runs/'+r.run_id+'" target="_blank" rel="noopener" title="open this run on GitHub">'+repoTxt+'</a>'
+          : repoTxt;
+        metaHtml=crfEsc(r.job||'\u2014');
+        // pr and branch are mutually exclusive by construction (runner-farm.sh:1862),
+        // so this is exhaustive, not a fallback.
+        if(/^\d+$/.test(r.pr||'')&&r.repo) metaHtml+='<a class="crf-ref" href="https://github.com/'+repoTxt+'/pull/'+r.pr+'" target="_blank" rel="noopener">#'+r.pr+'</a>';
+        else if(r.branch) metaHtml+='<span class="crf-ref">'+crfEsc(r.branch)+'</span>';
+        metaHtml+=v.elapsedHtml;
       } else {
-        jobHtml=crfEsc(running?'waiting for jobs':r.state);
+        // Both lines still render, so an idle row keeps the same height as a busy one
+        // and the table does not reflow every time a job starts.
+        metaHtml=running?'Waiting for a job':'\u2014';
       }
-      const jobCls=running&&r.phase==='busy'&&r.job?'crf-job':'crf-job crf-muted';
       return '<div class="crf-bay" data-name="'+crfEsc(r.name)+'" tabindex="0" role="button" aria-expanded="'+(window.CRF_DRAWER===r.name?'true':'false')+'" aria-label="Runner '+crfEsc(r.name)+', toggle log">'+
         '<span class="crf-ball '+ball+'"></span>'+
         '<span class="crf-name">'+crfEsc(r.name)+'</span>'+
-        '<span class="crf-phase"><uui-badge variant="'+bvar+'" size="xs"'+dark+'>'+crfEsc(ph)+'</uui-badge></span>'+
-        '<span class="'+jobCls+'" title="'+crfEsc(r.job||'')+'">'+jobHtml+'</span>'+
+        '<span class="crf-state">'+crfEsc(crfStateLabel(r))+'</span>'+
+        '<span class="crf-job" title="'+crfEsc(r.job||'')+'"><span class="crf-repo">'+repoHtml+'</span><span class="crf-job-m crf-muted">'+metaHtml+'</span></span>'+
         '<span class="crf-usage">'+crfBar(v.cpuPct)+'<span class="crf-uval">'+v.cpuTxt+'</span></span>'+
         '<span class="crf-usage">'+crfBar(v.memPct)+'<span class="crf-uval">'+v.memTxt+'</span></span>'+
         '<span class="crf-recycle" tabindex="0" role="button" aria-label="Recycle '+crfEsc(r.name)+'" title="Recycle this runner">&#10227;</span>'+
@@ -448,29 +581,96 @@ function crfRefresh(){
     // A rejected status poll (network down, or a 403 from a CSRF token that expired
     // on a reboot/array restart) must NOT look like an empty fleet — surface it in
     // the warning banner and keep the last-rendered bays in place. Cleared by the
-    // next successful poll (the d.warning handling above overwrites/hides it).
+    // next successful poll (see the explicit clear at the top of .then).
     const warn=document.getElementById('crf-warn');
     if(warn){ warn.textContent='⚠ '+(String((e&&e.message)||'').indexOf('session expired')>=0?'Session expired — reload the page to reconnect.':'Lost connection to the server — retrying…'); warn.style.display='block'; }
     console.error('ci-runner-farm status:',e);
   }).finally(()=>{ window.__crfBusyStatus=false; });
 }
+window.CRF_QUEUED=undefined; window.CRF_QUEUED_AGE=undefined; window.CRF_UP=0;
 crfRefresh(); setInterval(crfRefresh,5000);
+/* The queue card mixes two pollers: depth comes from queued-json (30s) and the
+   runners-online it is judged against comes from status-json (5s). Both write a
+   global and re-render through here, because judging urgency inside crfQueued
+   alone would weigh today's queue against a 30s-old runner count. */
+function crfRenderQueue(){
+  const q=window.CRF_QUEUED, up=window.CRF_UP;
+  const v=document.getElementById('crf-q-v'), s=document.getElementById('crf-q-s');
+  if(!v||!s) return;
+  // undefined means not fetched yet; null means the engine answered -1. Keeping them
+  // apart stops the 5s status poll from claiming "Unavailable" in the gap before the
+  // first queued-json of a page load or a fleet switch lands.
+  if(q===undefined) return;
+  if(typeof q!=='number'){
+    // -1 means "could not ask" \u2014 but it is ALSO what a fleet reports before anyone
+    // has asked at all: QUEUED_CACHE lives in tmpfs, so it is absent after every reboot
+    // and on a new fleet's first poll. The engine seeds `age` to 999999 when the file
+    // is missing (runner-farm.sh:1697), which is the only way to tell the two apart.
+    // Blaming GitHub for not answering a call that was never placed sends an operator
+    // to check a PAT that is fine.
+    const asked=typeof window.CRF_QUEUED_AGE==='number'&&window.CRF_QUEUED_AGE<3600;
+    if((window.CRF_LAST||{}).token===false){
+      v.textContent='Unavailable';
+      s.textContent='No GitHub token configured \u2014 queue depth cannot be read.';
+    } else if(!asked){
+      v.textContent='\u2013';
+      s.textContent='Checking GitHub\u2026';
+    } else {
+      v.textContent='Unavailable';
+      s.textContent='GitHub did not answer \u2014 retrying.';
+    }
+    s.className='crf-stat-small crf-muted';
+    return;
+  }
+  // No colour here on purpose. Colour on this page means HEALTH, and a queue deeper
+  // than the fleet is saturation \u2014 the fleet is working exactly as configured. Say it
+  // in the sub-line instead. (Variant D's other urgency trigger, oldest job >= 5
+  // minutes, needs a per-job age queued-json does not carry: its `age` is the CACHE's.)
+  v.textContent=q+' job'+(q===1?'':'s')+' waiting';
+  s.textContent=q===0?'Nothing waiting'
+    :((typeof up==='number'&&q>up)?'More jobs waiting than runners online.':'Runners are picking them up.');
+  s.className='crf-stat-small crf-muted';
+}
 function crfQueued(){
   if(!crfFleetActive()) return;
   crfPost({action:'queued-json'}).then(d=>{
-    const el=document.getElementById('crf-s-q'); if(!el) return;
-    const q=(typeof d.queued==='number'&&d.queued>=0)?d.queued:null;
-    el.textContent=q===null?'\u2013':q;
-    el.classList.toggle('crf-c-busy',!!q);
+    window.CRF_QUEUED=(typeof d.queued==='number'&&d.queued>=0)?d.queued:null;
+    window.CRF_QUEUED_AGE=typeof d.age==='number'?d.age:undefined;
+    crfRenderQueue();
   }).catch(()=>{});
 }
 crfQueued(); setInterval(crfQueued,30000);
 function crfBytes(b){ if(typeof b!=='number'||b<0) return '\u2013'; const u=['B','K','M','G','T']; let i=0,v=b; while(v>=1024&&i<u.length-1){v/=1024;i++;} return (i===0?v:(v>=10?Math.round(v):v.toFixed(1)))+u[i]; }
+/* Three states the old single dash collapsed into one: a cache root the engine
+   REJECTED as unsafe (-1 from cmd_cache_usage_refresh), a safe root that has not
+   been created yet (0), and a real measurement. The middle one used to render as
+   "0B", which told an operator their caches were empty rather than absent. */
+function crfRenderStorage(){
+  const d=window.CRF_CACHE||{}, v=document.getElementById('crf-st-v'), s=document.getElementById('crf-st-s');
+  if(!v||!s) return;
+  // total=-1 carries THREE different meanings: the cache root failed its safety check
+  // (runner-farm.sh:1611), du returned nothing on a perfectly safe root (:1616), and
+  // "no measurement exists yet" — CACHEUSE_CACHE is in tmpfs, so it is absent after
+  // every reboot and on a fleet's first poll. `age` separates the last one out: the
+  // engine seeds it to 999999 when the file is missing (:1624). Telling an operator
+  // their CACHE_ROOT is unsafe when it was simply never measured sends them to fix a
+  // setting that is fine, so the remaining two share one honest sentence.
+  const measured=typeof d.age==='number'&&d.age<3600;
+  if(typeof d.total!=='number'||(d.total<0&&!measured)){ v.textContent='–'; s.textContent='Measuring…'; return; }
+  if(d.total<0){
+    v.textContent='Unavailable';
+    s.textContent='The engine could not measure the cache root — check that CACHE_ROOT points at a dedicated folder on a pool.';
+    return;
+  }
+  v.textContent=crfBytes(d.total)+' cache';
+  s.textContent = d.total===0 ? 'The cache root does not exist yet — it appears on the first run.'
+    : (d.pkg>0 ? crfBytes(d.pkg)+' reclaimable' : 'Nothing to reclaim');
+}
 function crfCacheUsage(){
   if(!crfFleetActive()) return;
   crfPost({action:'cache-usage'}).then(d=>{
     window.CRF_CACHE=d;
-    const el=document.getElementById('crf-s-cache'); if(el) el.textContent=crfBytes(d.total);
+    crfRenderStorage();
     const clr=document.getElementById('crf-cache-clear'); if(clr) clr.title=(d.pkg>0?crfBytes(d.pkg)+' reclaimable':'');
   }).catch(()=>{});
 }

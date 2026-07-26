@@ -18,7 +18,6 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   :root{--crf-ok:#4caf50;--crf-busy:var(--brand-orange,#ff8c2f);--crf-err:var(--brand-red,#e22828);--crf-info:var(--link-text-color,#29b6f6)}
   .crf-muted{color:var(--alt-text-color)}
   .crf-banner{margin:6px 0 8px;padding:10px 12px;border-radius:6px;font-size:13px;line-height:1.4}
-  .crf-banner-sec{border:1px solid var(--crf-busy);background:color-mix(in srgb,var(--crf-busy) 12%,var(--background-color));color:var(--text-color);font-weight:bold}
   .crf-banner-warn{border:1px solid var(--crf-err);background:color-mix(in srgb,var(--crf-err) 12%,var(--background-color));color:var(--text-color)}
   .crf-banner-info{border:1px solid var(--crf-info);background:color-mix(in srgb,var(--crf-info) 10%,var(--background-color));color:var(--text-color)}
   uui-button:not(:defined),uui-brand-button:not(:defined){cursor:pointer;border:1px solid var(--border-color);border-radius:6px;padding:5px 12px;font-size:13px;color:var(--text-color)}
@@ -26,10 +25,11 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   .crf-toast-show{opacity:1;transform:none}
   .crf-ball{width:12px;height:12px;border-radius:50%;background:var(--disabled-text-color,#888);display:inline-block}
   .crf-ball-idle{background:var(--crf-ok)}
-  .crf-ball-busy{background:var(--crf-busy);animation:crf-pulse 1.6s ease-in-out infinite}
+  /* Blue, not amber: colour means health, and amber means degraded. A runner
+     executing a job is ACTIVE — the busiest fleet is not the sickest one. */
+  .crf-ball-busy{background:var(--crf-info);animation:crf-pulse 1.6s ease-in-out infinite}
   .crf-ball-error{background:var(--crf-err)}
   .crf-ball-starting{animation:crf-pulse 1.1s ease-in-out infinite}
-  .crf-phase uui-badge:not(:defined){font-size:11px;color:var(--alt-text-color)}
   .crf-console{border:1px solid var(--border-color);border-radius:6px;overflow:hidden;margin:0 0 8px}
   .crf-console-head{display:flex;align-items:center;justify-content:space-between;padding:3px 6px 3px 12px;min-height:30px;box-sizing:border-box;background:var(--table-header-background-color);font-size:11px;color:var(--alt-text-color)}
   .crf-lg-dim{color:var(--alt-text-color)}
