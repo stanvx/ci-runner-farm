@@ -1,9 +1,10 @@
 # Community Applications listing
 
-Everything needed to list **CI Runner Farm** on Unraid
+Optional metadata for listing **CI Runner Farm** on Unraid
 [Community Applications](https://docs.unraid.net/unraid-os/using-unraid-to/run-docker-containers/community-applications/)
 (CA). CA scrapes a maintainer's template repo: one `*.xml` per plugin plus a
-single `ca_profile.xml`. These files are served raw from this repo.
+single `ca_profile.xml`. These files are served raw from this repo if the fork
+is submitted to CA; they are not required for the direct plugin install.
 
 ## Files here
 
@@ -14,17 +15,15 @@ single `ca_profile.xml`. These files are served raw from this repo.
 | [`ci-runner-farm.png`](ci-runner-farm.png) | 256×256 listing icon (source: [`ci-runner-farm.svg`](ci-runner-farm.svg)). |
 | [`DESCRIPTION.md`](DESCRIPTION.md) | Copy for the CA listing and the forum support thread. |
 
-`PluginURL` points at `releases/latest/download/ci-runner-farm.plg`, so CA always
-installs the newest published release, and Unraid's "check for updates" resolves
-from the same URL.
+`PluginURL` points at this fork's `releases/latest/download/ci-runner-farm.plg`,
+so CA would install the newest release from `stanvx/ci-runner-farm`. Unraid's
+"check for updates" resolves from the same URL.
 
 ## Prerequisites (must be true before CA can list this)
 
-1. **The repository must be public.** CA fetches the `.plg`, the template XML, the
-   icon, and the screenshot over unauthenticated HTTPS. While `unraid/ci-runner-farm`
-   is private, every one of those URLs 404s. This is the hard gate — nothing below
-   works until the repo is public. (The R2 "preview" publish in the release
-   workflow is a private-only convenience, not a public CA source.)
+1. **This fork must be public.** CA fetches the `.plg`, the template XML, the
+   icon, and the screenshot over unauthenticated HTTPS. Every URL below targets
+   `stanvx/ci-runner-farm`; nothing works until that repository is public.
 2. **At least one published GitHub Release** so `releases/latest/download/…`
    resolves. release-please cuts these; confirm the `.plg` asset is attached.
 3. **A dedicated support thread on the Unraid forums.** CA submissions require it.
@@ -41,8 +40,8 @@ Use the Community Applications submission flow
 validates `ca_profile.xml`, checks for duplicates, and previews the listing.
 Point it at the raw URLs:
 
-- Template: `https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ci-runner-farm.xml`
-- Profile:  `https://raw.githubusercontent.com/unraid/ci-runner-farm/main/community-applications/ca_profile.xml`
+- Template: `https://raw.githubusercontent.com/stanvx/ci-runner-farm/main/community-applications/ci-runner-farm.xml`
+- Profile:  `https://raw.githubusercontent.com/stanvx/ci-runner-farm/main/community-applications/ca_profile.xml`
 
 The CA moderation team then vets it for security, functionality, and design
 before it goes live.

@@ -22,8 +22,8 @@ dependency caches that stay hot between runs, at zero cost per minute.
 - **It's the Unraid thing to do.** Self-hosted runners are just Docker
   containers, and Docker is what your server is already great at. This is "do
   more with the hardware you have," turned up to a build farm.
-- **A couple of clicks to install.** It's a normal plugin from Community
-  Applications, configured entirely from the webGUI.
+- **A couple of clicks to install.** Paste the fork's `.plg` URL into Unraid,
+  then configure it entirely from the webGUI.
 
 ---
 
@@ -68,9 +68,15 @@ https://github.com/stanvx/ci-runner-farm/releases/latest/download/ci-runner-farm
 Unraid always resolves this to the newest published release from this
 repository, and its built-in "check for updates" keeps the plugin current.
 
-This fork installs by URL only. It is not listed in Community Applications —
-`community-applications/` holds the upstream listing material and is not used
-here.
+This fork installs by URL only. It is not currently listed in Community
+Applications; the files under `community-applications/` are optional submission
+metadata and are not used by this direct install.
+
+The fork keeps the upstream plugin identity (`ci-runner-farm`), so install it
+over an existing upstream CI Runner Farm installation rather than trying to run
+both copies. The config and token path remains
+`/boot/config/plugins/ci-runner-farm/`; stop the fleet before switching release
+sources.
 
 ---
 
@@ -78,37 +84,25 @@ here.
 
 Everything lives on one page — **Settings → Utilities → CI Runner Farm** — split
 into three tabs: **Fleet** (run and watch, the default view), **Runner image**
-(build), and **Settings** (configure). The steps below follow setup order, so
-they start on the **Settings** tab (rightmost). You'll need a GitHub Personal
-Access Token and a fast pool/share for caches.
+(build), and **Settings** (host-wide configuration). You'll need a GitHub
+credential and a fast pool/share for caches.
 
-### 1. Configure the fleet — the *Settings* tab
+### 1. Configure the host — the *Settings* tab
 
-The Settings tab holds the whole configuration on one screen:
+The Settings tab holds host-wide values shared by every fleet:
 
-- **GitHub** — pick your **scope** (`repo` or `org`), the **owner** and **target
-  repos**, and an optional **runner group**.
-- **Runners** — how many **concurrent runners**, their **labels** (so workflows
-  target this fleet with `runs-on:`), and optional **CPU / memory caps per
-  runner** so CI can't starve the rest of the box.
-- **Runner image** — the **Image source**: **Built-in** (build locally, below),
-  or **Remote** to pull a named image, e.g. `ghcr.io/org/ci-runner-image:latest`
-  (for a private image, set the registry server/username and save a registry
-  token; for `ghcr.io`, a blank registry token reuses your GitHub token).
-- **Storage & caches** — the **warm caches** (host-subdir → container-path
-  mounts; defaults cover pnpm/npm/yarn/Playwright) and the **workspace tmpfs
-  size**.
-- **Docker** — **Docker-in-Docker** mode, host-socket sharing, and network
-  isolation.
-- **Autoscaling** and **image auto-update** — optional; see steps below.
+- **GitHub token** — used by legacy fleets; save it in the token band. It is
+  stored at `/boot/config/plugins/ci-runner-farm/token` with `chmod 600`.
+- **Registry credentials** — host-wide Docker registry login and token.
+- **Storage** — cache root and the shared image-mirror setting.
+- **Dashboard** — whether the optional Main dashboard tile is shown.
 
-Save your **Personal Access Token** from the band at the top (`repo` scope; add
-`admin:org` for org runners). It's stored at
-`/boot/config/plugins/ci-runner-farm/token` with `chmod 600` and is **never**
-written into your plugin config — the **Get a pre-scoped PAT** link opens GitHub
-with exactly the right scopes pre-filled.
+For legacy fleets, save a **Personal Access Token** from the band at the top
+(`repo` scope; add `admin:org` for org runners). It is **never** written into
+the plugin config. Scale-set fleets can instead use a named PAT or GitHub App
+credential configured on the Fleet tab.
 
-![The Settings tab — GitHub scope and targets, per-runner CPU/memory caps, runner image source, warm caches, Docker-in-Docker, autoscaling, and secure token storage, all on one screen](docs/images/settings.png)
+![The Settings tab — host-wide cache, registry, dashboard, and secure token settings](docs/images/settings.png)
 
 ### 2. Build a runner image — the *Runner image* tab
 
@@ -124,7 +118,16 @@ live build log. Restart the fleet to roll onto the new image. No registry needed
 
 ### 3. Run and watch — the *Fleet* tab
 
-The Fleet tab is mission control. **Validate** (no token needed) confirms the
+First configure the selected fleet on this tab:
+
+- **GitHub** — choose `repo` or `org` scope, owner/repos, runner group, labels,
+  image, resource limits, caches, Docker mode, and network isolation.
+- **Fleet mode** — use `legacy` for persistent registered runners, or `scale
+  set` for one just-in-time runner per GitHub assignment. Scale-set mode also
+  needs the GitHub scale-set name and a named credential; use **Test** beside
+  the credential field before saving.
+
+The Fleet tab is then mission control. **Validate** (no token needed) confirms the
 host can provision, then **Start / Stop / Restart / Scale** the fleet and watch
 live per-runner status: phase, the **repo and PR # each runner is building right
 now** (linked to the GitHub run), and live **CPU / memory** against each runner's
@@ -156,6 +159,19 @@ Once started, the runners also show up as ordinary Docker containers
 (`ci-runner-1…N`), plus the optional `ci-runner-mirror` registry mirror — each
 with the warm-cache bind mounts you configured — register with GitHub, and start
 picking up jobs.
+
+### 5. Scale-set mode
+
+Scale-set mode connects the fleet to GitHub, accepts job assignments, creates a
+just-in-time runner for each assignment, and removes it after the job. GitHub
+controls demand there, so the Fleet tab's manual **Scale** and autoscaling
+controls do not apply. Workflows target the configured scale-set name in
+`runs-on:`.
+
+The listener is a separate `crf-scalesetd` release asset installed by the full
+`.plg`. The development `deploy.sh` copies the text runtime only; it does not
+install that binary. Test scale-set mode with a published/rebuilt `.plg` on an
+Unraid host, then run a real workflow before treating it as hardware-verified.
 
 ---
 
@@ -257,8 +273,9 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the full process, the invariants
 ./deploy.sh root@tower         # scp src/ to a dev Unraid host (fast iteration; not for installs)
 ```
 
-`deploy.sh` copies a hand-listed subset of files, not the whole tree — rebuild
-and install the `.plg` to test anything it does not cover.
+`deploy.sh` copies the source text runtime only; it does not install the
+release-only `crf-scalesetd` binary. Install the `.plg` to test the complete
+plugin, especially scale-set mode.
 
 The plugin file tree is tarred into `ci-runner-farm.tgz` and published as a
 version-pinned release asset; the `.plg` downloads it by URL and verifies it by
@@ -303,7 +320,7 @@ tests/
 CONTRIBUTING.md                    dev setup, local checks, commit conventions
 SECURITY.md                        private vulnerability reporting + scope
 docs/RELEASING.md                  release process and its invariants
-community-applications/            upstream CA listing material (unused by this fork)
+community-applications/            optional CA submission metadata (not listed)
 .github/workflows/
   lint.yml                         bash -n / php -l + tests
   package-plugins.yml              PR/branch build + validate; Go build/vet/test + repro cmp
