@@ -70,7 +70,9 @@ make_daemon() {
   # Main package: cmd/ layout if the module uses one, else the module root.
   local pkg='.'
   [ -d "daemon/cmd/${DAEMON}" ] && pkg="./cmd/${DAEMON}"
-  ( cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO build -trimpath -ldflags='-s -w -buildid=' -o "../${DAEMON}" "$pkg" )
+  # Disable VCS stamping: release-please squash-merges the release PR, so the
+  # source commit changes between metadata preparation and the release tag.
+  ( cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "../${DAEMON}" "$pkg" )
 }
 
 # `build-plg.sh --tgz-only` / `--daemon-only` just (re)build one asset — used by
