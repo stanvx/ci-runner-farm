@@ -14,7 +14,23 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
  * "ci_runner_farm" channel (see nchan/ci_runner_farm); the Nchan= header keeps
  * that publisher alive while this tile is visible. The publisher pushes an
  * AGGREGATE-ONLY payload ({count,up,busy,idle}) — the /sub channel is not behind
- * the webGUI login, so no per-runner repo/branch/job detail is broadcast. */
+ * the webGUI login, so no per-runner repo/branch/job detail is broadcast.
+ *
+ * The per-fleet breakdown below does NOT ride that channel, and the publisher is
+ * unchanged: fleet names are per-install detail, and /sub is unauthenticated on the
+ * LAN. Rows are fetched from exec.php instead — same webGUI login, same CSRF gate as
+ * every other request this plugin makes.
+ *
+ * A single-fleet install renders exactly what it rendered before and makes no extra
+ * request at all: the fleet count is a glob at render time, and the polling code is
+ * only emitted when there is a second fleet to tell apart. */
+$crfw_fleets = ['default'];
+foreach (glob('/boot/config/plugins/ci-runner-farm/fleets/*.cfg') ?: [] as $f) {
+  $n = basename($f, '.cfg');
+  if ($n !== 'default' && preg_match('/^[a-z][a-z0-9-]{0,30}$/', $n)) $crfw_fleets[] = $n;
+}
+$crfw_multi = count($crfw_fleets) > 1;
+$crfw_csrf  = $var['csrf_token'] ?? '';
 ?>
 <style>
   .crfw-wrap{display:flex;flex-direction:column;gap:8px;padding:2px}
@@ -29,6 +45,10 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
   .crfw-dot.on{background:#63a659}
   .crfw-foot{font-size:1.15rem;opacity:.7}
   .crfw-foot a{margin-left:auto}
+  .crfw-fleets{display:flex;flex-direction:column;gap:2px;font-size:1.15rem}
+  .crfw-frow{display:grid;grid-template-columns:9px 1fr auto;gap:8px;align-items:center}
+  .crfw-fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crfw-fc{opacity:.72;font-variant-numeric:tabular-nums}
 </style>
 
 <div class="crfw-wrap">
@@ -41,6 +61,19 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
     <div class="crfw-tile"><div class="crfw-v crfw-busy" id="crfw-busy">&ndash;</div><div class="crfw-l">Busy</div></div>
     <div class="crfw-tile"><div class="crfw-v crfw-idle" id="crfw-idle">&ndash;</div><div class="crfw-l">Idle</div></div>
   </div>
+<?php if ($crfw_multi): ?>
+  <!-- The aggregate above stays exactly as it was; these rows say which fleets it is
+       the sum OF, which is the one thing a box with several fleets cannot read off it. -->
+  <div class="crfw-fleets" id="crfw-fleets">
+<?php foreach ($crfw_fleets as $n): ?>
+    <div class="crfw-frow" data-fleet="<?=htmlspecialchars($n, ENT_QUOTES)?>">
+      <span class="crfw-dot"></span>
+      <span class="crfw-fn"><?=htmlspecialchars($n)?></span>
+      <span class="crfw-fc">&ndash;</span>
+    </div>
+<?php endforeach; ?>
+  </div>
+<?php endif; ?>
   <div class="crfw-foot" style="display:flex">
     <span id="crfw-meta">&nbsp;</span>
     <a href="/Utilities/RunnerFarm">Manage ›</a>
@@ -76,4 +109,34 @@ Cond="(preg_match('/DASHBOARD_WIDGET_ENABLE\s*=\s*[\x22\x27]false[\x22\x27]/', @
   setInterval(function(){ if(Date.now()-last > 24000) markDown('No recent update — reconnecting…'); }, 6000);
   connect();
 })();
+<?php if ($crfw_multi): ?>
+/* Per-fleet rows. NOT on the nchan channel (unauthenticated on the LAN) — one CSRF'd
+   fleets-json every 30s, and only while the dashboard is actually on screen. That verb
+   re-execs the engine once per fleet, which is why it is 30s and not the tile's push
+   rate: the live number stays the aggregate above. */
+(function(){
+  var URL='/plugins/ci-runner-farm/include/exec.php', CSRF='<?=$crfw_csrf?>';
+  var box=document.getElementById('crfw-fleets');
+  function paint(fleets){
+    var by={}; (fleets||[]).forEach(function(f){ by[f.name]=f; });
+    Array.prototype.forEach.call(box.querySelectorAll('.crfw-frow'),function(row){
+      var f=by[row.dataset.fleet], run=f?(+f.running||0):0, cfg=f?(+f.configured||0):0;
+      row.querySelector('.crfw-dot').className='crfw-dot'+(run>0?' on':'');
+      // draining_to is the one state a bare count reads as a fault rather than a plan.
+      row.querySelector('.crfw-fc').textContent=(f&&f.draining_to)
+        ? run+'/'+cfg+' → '+f.draining_to : run+'/'+cfg;
+    });
+  }
+  function poll(){
+    if(document.hidden||!box.offsetParent) return;
+    fetch(URL,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'action=fleets-json&fleet=default&csrf_token='+encodeURIComponent(CSRF)})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(d){ if(d) paint(d.fleets); })
+      .catch(function(){});   // the aggregate tiles already surface a backend outage
+  }
+  poll(); setInterval(poll,30000);
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden) poll(); });
+})();
+<?php endif; ?>
 </script>

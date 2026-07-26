@@ -6,6 +6,11 @@
    relied on by document order (renaming crfPost or reordering the tab ordinals used
    to silently break the other tabs). Emitted once per document via include_once.
    Runs in the tab's scope, so $var (the CSRF token) is available. */
+/* Dynamix loads every RunnerFarm tab into ONE document, so a `const` emitted by two
+   tabs is a redeclaration SyntaxError that kills both scripts. CRF_DEFAULTS is needed
+   by the Fleet tab (fleet keys) and the Settings tab (global keys) alike, so it is
+   emitted here — the one place that is include_once'd by all of them. */
+include_once __DIR__ . '/crf-config.php';
 $crf_csrf = $var['csrf_token'] ?? '';
 $crf_uui_base = '/plugins/dynamix.my.servers/unraid-components/uui/';
 $crf_util_css = '';
@@ -38,10 +43,44 @@ foreach (glob('/usr/local/emhttp/plugins/dynamix.my.servers/unraid-components/st
   .crf-lg-err{color:var(--crf-err)}
   .crf-console-body{white-space:pre-wrap;font-family:bitstream,monospace;font-size:12px;line-height:1.5;min-height:90px;max-height:200px;overflow:auto;background:var(--shade-bg-color,var(--background-color));color:var(--text-color);padding:6px 10px}
   .crf-builder-wrap textarea{width:100%;font-family:bitstream,monospace;font-size:12px;background:var(--input-bg-color);color:var(--text-color);border:1px solid var(--textarea-border-color,var(--input-border-color))}
+  /* Config form (crf_render_fields), rendered identically by the Fleet tab for the
+     fleet layer and the Settings tab for the global layer. Capped at 780px on purpose:
+     a settings form read left to right across a 2500px monitor is unreadable, and the
+     multi-column card grid this replaced made "which section am I in" a scanning
+     problem. The 222px left margin lines help + actions up under the fields. */
+  .crf-cfg{max-width:780px;margin-bottom:8px}
+  .crf-cfg-title{font-size:17px;font-weight:500;margin:0;color:var(--text-color)}
+  .crf-cfg-head{margin-bottom:14px}
+  .crf-cfg-for{display:block;font-size:12px;margin-top:3px;line-height:1.45}
+  .crf-cfg-fs{border:none;margin:0;padding:0;min-width:0}
+  .crf-cfg-fs[disabled]{opacity:.55}
+  .crf-cfg-sec{margin:0 0 18px}
+  .crf-cfg-h{font-size:13px;font-weight:500;color:var(--text-color);margin:0 0 2px;padding:0;border:none;letter-spacing:.01em}
+  .crf-cfg-blurb{font-size:12px;color:var(--alt-text-color);margin:0 0 8px;line-height:1.45}
+  .crf-cfg dl.crf-cfg-row{margin:0!important;padding:3px 0!important;display:flex;align-items:center;gap:12px;background:none!important}
+  .crf-cfg dl.crf-cfg-row dt{float:none!important;width:210px!important;min-width:0;flex:0 0 210px;text-align:right;font-size:12px;margin:0!important;padding:0!important;background:none!important}
+  .crf-cfg dl.crf-cfg-row dd{float:none!important;flex:1;min-width:0;width:auto!important;margin:0!important;padding:0!important;background:none!important}
+  .crf-cfg dd input[type=text],.crf-cfg dd input[type=number],.crf-cfg dd select{width:100%!important;max-width:none!important;font-size:12px;padding:3px 6px;margin:0}
+  .crf-cfg .inline_help{font-size:12px;color:var(--alt-text-color);background:var(--shade-bg-color,transparent);border-left:2px solid var(--border-color);border-radius:0;margin:2px 0 8px 222px;padding:6px 10px;line-height:1.45}
+  .crf-cfg .inline_help p{margin:0}
+  .crf-cfg-actions{display:flex;gap:8px;padding:6px 0 2px;margin-left:222px}
+  .crf-cfg-warn{display:none;font-size:12px;color:var(--crf-err);font-weight:bold;margin:0 0 6px 222px}
+  .crf-cfg-warn.on{display:block}
+  .crf-cfg-note{display:none;font-size:12px;color:var(--crf-busy);margin:0 0 6px 222px}
+  .crf-cfg-note.on{display:block}
+  @media (max-width:860px){
+    .crf-cfg dl.crf-cfg-row{display:block}
+    .crf-cfg dl.crf-cfg-row dt{width:auto!important;flex:none;text-align:left}
+    .crf-cfg .inline_help,.crf-cfg-actions,.crf-cfg-warn,.crf-cfg-note{margin-left:0}
+  }
   @keyframes crf-pulse{0%,100%{opacity:1}50%{opacity:.35}}
   @media (prefers-reduced-motion:reduce){.crf-ball-busy,.crf-ball-starting{animation:none}}
 </style>
 <script>
+/* Every form field's built-in default, keyed by cfg key. Backs each tab's "Reset to
+   defaults" button and the value a form falls back to for any key not written to
+   flash — so flash keeps holding only what the operator actually changed. */
+const CRF_DEFAULTS = <?=json_encode($crf_defaults)?>;
 const CRF_CSRF = "<?=$crf_csrf?>";
 const CRF_URL  = "/plugins/ci-runner-farm/include/exec.php";
 const CRF_UUI_BASE = "<?=$crf_uui_base?>";

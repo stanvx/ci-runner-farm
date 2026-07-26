@@ -3,6 +3,7 @@
    Guards every action with the Unraid CSRF token, then shells out to
    runner-farm.sh. Token writes go to a chmod-600 file, never ci-runner-farm.cfg. */
 header('Content-Type: application/json');
+require_once __DIR__ . '/crf-config.php';
 
 $var = @parse_ini_file('/var/local/emhttp/var.ini');
 $csrf = $var['csrf_token'] ?? '';
@@ -21,9 +22,10 @@ $action  = $_REQUEST['action'] ?? 'status-json';
 // Which fleet this request is for. Same regex the engine enforces — validate here too
 // so a crafted value can never reach a path or a shell argument. Fleet `default` is the
 // legacy install, so a request with no fleet param behaves exactly as it did before.
-const FLEET_NAME_RE = '/^[a-z][a-z0-9-]{0,30}$/';   // same shape the engine enforces
+// CRF_FLEET_RE (crf-config.php) is the one PHP copy of that shape — it also guards the
+// cfg-path helpers there, so a second literal here could drift out from under them.
 $fleet = $_REQUEST['fleet'] ?? 'default';
-if (!preg_match(FLEET_NAME_RE, $fleet)) {
+if (!preg_match(CRF_FLEET_RE, $fleet)) {
   http_response_code(400);
   echo json_encode(['ok' => false, 'error' => 'bad fleet']);
   exit;
@@ -204,6 +206,44 @@ switch ($action) {
     echo $out !== '' ? $out : json_encode(['ok'=>true,'running'=>false,'rc'=>null,'log'=>'']);
     break;
 
+  // ---- config -------------------------------------------------------------
+  // The two layers the engine assembles a fleet from (crf-config.php): `global` is
+  // host-wide and always the legacy cfg; `fleet` is the selected fleet's own cfg.
+  // Neither goes through Unraid's /update.php: that takes ONE hardcoded `#file`, and
+  // the Fleet tab's target is chosen in the browser, one file per fleet. Writing here
+  // also lets the save MERGE — fleet `default`'s cfg holds both layers at once, so a
+  // whole-file rewrite from one form's fields would delete the other layer outright.
+  case 'get-config':
+    $layer = ($_REQUEST['layer'] ?? 'fleet') === 'global' ? 'global' : 'fleet';
+    echo json_encode(['ok' => true, 'layer' => $layer, 'fleet' => $fleet, 'cfg' => crf_cfg_read($fleet, $layer)]);
+    break;
+
+  case 'save-config':
+    $layer = ($_REQUEST['layer'] ?? 'fleet') === 'global' ? 'global' : 'fleet';
+    $in = json_decode($_REQUEST['cfg'] ?? '', true);
+    if (!is_array($in)) { echo json_encode(['ok'=>false,'error'=>'bad config payload']); break; }
+    $file = crf_cfg_file($fleet, $layer);
+    // A fleet's cfg is created by fleet-create and removed by fleet-delete. Refusing to
+    // create one here means a stale browser tab pointing at a deleted fleet cannot
+    // resurrect it as a half-configured ghost the rail would then list.
+    if (!is_file($file) && !($layer === 'global' || $fleet === 'default')) {
+      echo json_encode(['ok'=>false,'error'=>'no such fleet']); break;
+    }
+    // Allowlist by the ENGINE's own key list for this layer, so a crafted POST can
+    // neither write a key the engine ignores nor cross a value into the other layer.
+    $kv = [];
+    foreach (crf_layer_keys($layer) as $k) if (array_key_exists($k, $in)) $kv[$k] = crf_cfg_clean($in[$k]);
+    if (!$kv) { echo json_encode(['ok'=>false,'error'=>'nothing to save']); break; }
+    if (!crf_cfg_merge($file, $kv)) { echo json_encode(['ok'=>false,'error'=>'could not write the config']); break; }
+    // Same follow-up the settings form's #command used to run: migrate any RUNNING
+    // runner still on the previous baked config onto the new one, draining busy runners
+    // so no in-flight job is killed. Detaches instantly (cmd_reconcile_config).
+    // A global key is baked into EVERY fleet's runners, so that save reconciles without
+    // --fleet, which the engine fans out over all of them.
+    run(($layer === 'global' ? escapeshellarg($SCRIPT) : $CMD) . ' reconcile-config');
+    echo json_encode(['ok' => true, 'action' => 'save-config', 'layer' => $layer, 'saved' => count($kv)]);
+    break;
+
   case 'fleets-json':
     // Fleet list is host-wide: no --fleet, so the engine fans out over every fleet.
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleets-json');
@@ -212,7 +252,7 @@ switch ($action) {
 
   case 'fleet-create': case 'fleet-delete':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(CRF_FLEET_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($n));
     $j = last_json($out);
     echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => $action]);
@@ -220,7 +260,7 @@ switch ($action) {
 
   case 'fleet-rename':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match(FLEET_NAME_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(CRF_FLEET_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleet-rename ' . escapeshellarg($fleet) . ' ' . escapeshellarg($n));
     $j = last_json($out);
     echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'fleet-rename']);

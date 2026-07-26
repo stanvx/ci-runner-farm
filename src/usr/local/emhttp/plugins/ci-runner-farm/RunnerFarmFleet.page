@@ -3,13 +3,24 @@ Title="Fleet"
 Tag="server"
 ---
 <?php
-/* Fleet hub tab: live stats, actions, runner bays with usage, and the fleet log.
+/* Fleet hub tab: the three layers variant D separates — NAVIGATION (the rail),
+   OPERATIONAL STATUS (identity, posture, cards, runner bays, log) and CONFIGURATION
+   (this fleet's own FLEET_KEYS, below the fold).
    The shared crf* JS core, the @unraid/ui force-loader, and the shared .crf-*
    styles are included from include/crf-core.php (below, via include_once) so all
    three RunnerFarm tabs share one declared dependency regardless of tab load
    order. Only Fleet-specific pollers, rendering, and styles live in this file. */
 ?>
 <?php include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php'; ?>
+<?php
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-config.php';
+include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-fields.php';
+/* Rendered with DEFAULTS, never with a fleet's stored values: which fleet is selected
+   lives in the browser (localStorage), so PHP cannot know it at render time. The form
+   stays disabled until get-config lands and fills it — otherwise an operator could
+   edit a default-looking value and Apply it over the fleet's real config. */
+$host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec("grep MemTotal /proc/meminfo"))) / 1048576);
+?>
 <div class="crf-shell">
 <!-- Fleet NAVIGATION. Hidden entirely on a single-fleet install, so an install that
      never creates a second fleet reads exactly as it did before multi-fleet landed. -->
@@ -36,6 +47,13 @@ Tag="server"
       <div class="crf-menu-list" id="crf-menu" hidden role="menu">
         <span role="menuitem" tabindex="0" onclick="crfMenuPick('restart')">Restart fleet</span>
         <span role="menuitem" tabindex="0" onclick="crfMenuPick('validate')">Run preflight validation</span>
+        <!-- Fleet lifecycle lives here rather than beside the rail: the rail is hidden
+             on a single-fleet install, and "add a second fleet" must still be reachable
+             from the one place that is always shown. -->
+        <hr>
+        <span role="menuitem" tabindex="0" onclick="crfFleetAdd()">Add fleet&hellip;</span>
+        <span role="menuitem" tabindex="0" id="crf-menu-rename" onclick="crfFleetRename()">Rename fleet&hellip;</span>
+        <span role="menuitem" tabindex="0" id="crf-menu-delete" onclick="crfFleetDelete()">Delete fleet&hellip;</span>
       </div>
     </div>
   </div>
@@ -104,6 +122,28 @@ Tag="server"
   </div>
   <div id="crf-log" class="crf-console-body"><span class="crf-muted">Output from fleet actions and image builds appears here.</span></div>
 </div>
+
+<!-- CONFIGURATION. This fleet's own keys (the engine's FLEET_KEYS) and nothing else —
+     host-wide keys are the Settings tab's. No inheritance: every fleet stores every one
+     of these outright, which is exactly the two-layer model the engine assembles from.
+     A narrow column below the fold, so the page reads status-first. -->
+<div class="crf-cfg" id="crf-cfg">
+  <div class="crf-cfg-head">
+    <h2 class="crf-cfg-title">Configuration</h2>
+    <span class="crf-muted crf-cfg-for">Applies to fleet <b id="crf-cfg-for">default</b> only. Cache root, the shared image mirror and the private registry are host-wide, on the Settings tab.</span>
+  </div>
+  <form id="crf-cfg-form" onsubmit="return false">
+    <fieldset id="crf-cfg-fs" class="crf-cfg-fs" disabled>
+      <?php crf_render_fields('fleet', []); ?>
+      <div class="crf-cfg-warn" id="crf-cfg-aswarn">Min runners is above Max runners &mdash; autoscaling will never settle.</div>
+      <div class="crf-cfg-note" id="crf-cfg-memwarn"></div>
+      <div class="crf-cfg-actions">
+        <uui-button size="sm" id="crf-cfg-apply" onclick="crfCfgSave()">Apply</uui-button>
+        <uui-button variant="secondary" size="sm" onclick="crfCfgReset()">Reset to defaults</uui-button>
+      </div>
+    </fieldset>
+  </form>
+</div>
 </section>
 </div>
 
@@ -144,6 +184,8 @@ Tag="server"
   .crf-menu-list span{display:block;padding:6px 10px;font-size:13px;color:var(--text-color);border-radius:4px;cursor:pointer}
   .crf-menu-list span:hover{background:var(--hover-table-row-background-color)}
   .crf-menu-list span:focus-visible{outline:2px solid var(--link-text-color,#29b6f6);outline-offset:-2px}
+  .crf-menu-list span[hidden]{display:none}
+  .crf-menu-list hr{border:none;border-top:1px solid var(--border-color);margin:4px 0}
   @media (max-width:860px){
     .crf-shell{flex-direction:column}
     .crf-rail{flex:1 1 auto;width:100%;box-sizing:border-box}
@@ -216,6 +258,9 @@ Tag="server"
   .crf-bay-drawer{border-top:1px solid var(--table-border-color,var(--border-color));background:var(--shade-bg-color,var(--background-color));padding:8px 12px 8px 44px;font-family:bitstream,monospace;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:190px;overflow:auto;cursor:default}
   .crf-empty{display:flex;align-items:center;gap:14px;padding:18px 16px}
   .crf-empty strong{font-size:13px;color:var(--text-color)}
+  /* The .crf-cfg-* config-form rules live in crf-core.php: the Settings tab renders the
+     same DOM from the same crf_render_fields(), so they are shared, not Fleet-specific. */
+  .crf-cfg{margin-top:22px;border-top:1px solid var(--border-color);padding-top:14px}
 </style>
 
 <script>
@@ -263,6 +308,10 @@ function crfScale(){ const n=document.getElementById('crf-n').value; crfPost({ac
    selected fleet itself lives in crf-core.php (crfFleet/crfSetFleet), which
    also stamps it onto every crfPost — nothing here threads it by hand. */
 window.CRF_FLEETS=[];
+/* Declared up here, not beside the configuration code below, because crfSelectFleet
+   reads it and the 30s fleet-list poller can call that before this script has finished
+   executing — a `let` in its original place would be in the temporal dead zone. */
+let crfCfgDirty=false;
 const CRF_HEALTH_LABEL={healthy:'Healthy',active:'Handing over',degraded:'Degraded',failed:'Failed',stopped:'Stopped'};
 /* Colour means health only. `active` (blue) is a fleet mid-handover: it is doing
    something deliberate, not something wrong, so it must not read as degraded. */
@@ -301,6 +350,11 @@ function crfRenderIdentity(){
     if(f.draining_to){ dr.textContent='⟳ '+f.name+' is being renamed to '+f.draining_to+' — runners move across as they go idle, and '+f.name+' disappears once its last one is gone.'; dr.style.display='block'; }
     else { dr.textContent=''; dr.style.display='none'; }
   }
+  // Fleet `default` IS the legacy config path — the engine refuses to rename or delete
+  // it, so the menu does not offer what it would only refuse.
+  const legacy=f.name==='default';
+  const mr=document.getElementById('crf-menu-rename'); if(mr) mr.hidden=legacy;
+  const md=document.getElementById('crf-menu-delete'); if(md) md.hidden=legacy;
   const p=document.getElementById('crf-primary');
   if(p){
     // Mid-handover the engine refuses to refill this fleet (cmd_start resumes the
@@ -327,6 +381,10 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') crfMenuOpen(false)
 
 function crfSelectFleet(name){
   if(!name||name===crfFleet()) return;
+  // The configuration column belongs to the fleet we are leaving, and switching
+  // reloads it from the new fleet's cfg. Unapplied edits would vanish with no trace,
+  // so they are the one thing a switch asks about.
+  if(crfCfgDirty&&!window.confirm('Discard the unapplied configuration changes for '+crfFleet()+'?')) return;
   crfSetFleet(name);
   // Every cache on this page belongs to the fleet we just left — the runner rows,
   // the open log drawer, the cache figure and the action log. Drop them all rather
@@ -347,7 +405,7 @@ function crfSelectFleet(name){
   const tb=document.getElementById('crf-bays-body');
   if(tb){ tb.__crfSig=null; tb.innerHTML='<div class="crf-bay"><span></span><span class="crf-muted">loading...</span><span></span><span></span><span></span><span></span><span></span></div>'; }
   crfRenderRail(); crfRenderIdentity();
-  crfRefresh(); crfQueued(); crfCacheUsage(); crfStats(); crfFarmLog();
+  crfRefresh(); crfQueued(); crfCacheUsage(); crfStats(); crfFarmLog(); crfCfgLoad();
 }
 document.getElementById('crf-rail-body').addEventListener('click',e=>{
   const row=e.target.closest('.crf-rail-row[data-fleet]'); if(row) crfSelectFleet(row.dataset.fleet);
@@ -372,6 +430,144 @@ function crfFleetList(){
   }).catch(()=>{});
 }
 crfFleetList(); setInterval(crfFleetList,30000);
+
+/* ---- fleet lifecycle ----------------------------------------------------
+   Thin wrappers over the fleet-create / fleet-rename / fleet-delete verbs the engine
+   already owns. Every refusal (fleet exists, still has containers, already renaming)
+   is the ENGINE's sentence, surfaced verbatim — re-deciding those rules here would
+   give the operator two answers that could disagree. */
+const CRF_FLEET_RE=/^[a-z][a-z0-9-]{0,30}$/;   // same shape the engine and exec.php enforce
+const CRF_NAME_HINT='Lowercase letter first, then letters, digits or dashes (max 31 characters).';
+function crfAskName(title,text,def,cb){
+  if(window.swal){
+    swal({title,text,type:'input',showCancelButton:true,closeOnConfirm:false,inputValue:def||'',inputPlaceholder:'e.g. release'},v=>{
+      if(v===false) return;
+      const n=String(v||'').trim();
+      if(!CRF_FLEET_RE.test(n)){ swal.showInputError(CRF_NAME_HINT); return; }
+      swal.close(); cb(n);
+    });
+    return;
+  }
+  const n=String(window.prompt(text+'\n'+CRF_NAME_HINT,def||'')||'').trim();
+  if(CRF_FLEET_RE.test(n)) cb(n);
+}
+function crfFleetVerb(action,name,onOk){
+  crfPost({action,name}).then(o=>{
+    if(o.ok===false){ crfToast(o.error||(action+' failed')); return; }
+    onOk(o);
+  }).catch(e=>{ crfToast(action+' failed'); console.error('ci-runner-farm '+action+':',e); });
+}
+function crfFleetAdd(){
+  crfMenuOpen(false);
+  crfAskName('Add a fleet','A new fleet starts empty — every setting at its built-in default — and owns its own runners, network and image.','',n=>{
+    crfFleetVerb('fleet-create',n,()=>{ crfToast('Fleet '+n+' created'); crfSelectFleet(n); crfFleetList(); });
+  });
+}
+function crfFleetRename(){
+  crfMenuOpen(false);
+  const from=crfFleet();
+  if(from==='default'){ crfToast('Fleet default cannot be renamed — it is the legacy config path'); return; }
+  crfAskName('Rename '+from,'A fleet with runners up is HANDED OVER rather than renamed in place: runners move to the new name as they go idle, so no in-flight job is killed.',from,n=>{
+    crfFleetVerb('fleet-rename',n,o=>{
+      crfToast(o.draining ? 'Handing '+o.runners+' runner(s) over to '+n : 'Renamed to '+n);
+      // Mid-handover BOTH fleets are real, and the old one is the draining source the
+      // banner explains — so only jump to the new name once the rename was instant.
+      if(!o.draining) crfSelectFleet(n);
+      crfFleetList();
+    });
+  });
+}
+function crfFleetDelete(){
+  crfMenuOpen(false);
+  const f=crfFleet();
+  if(f==='default'){ crfToast('Fleet default cannot be deleted — it is the legacy config path'); return; }
+  const go=()=>crfFleetVerb('fleet-delete',f,()=>{ crfToast('Fleet '+f+' deleted'); crfSelectFleet('default'); crfFleetList(); });
+  // The engine refuses while the fleet still owns containers, so this confirms the
+  // loss of its CONFIG — the one thing delete actually destroys.
+  if(window.swal){
+    swal({title:'Delete '+f+'?',text:'Its configuration is removed from the flash drive. The fleet must already be stopped; its caches on the pool are left alone.',
+      type:'warning',showCancelButton:true,confirmButtonText:'Delete fleet',cancelButtonText:'Cancel'},ok=>{ if(ok) go(); });
+  } else if(window.confirm('Delete fleet '+f+'? Its configuration is removed from the flash drive.')) go();
+}
+
+/* ---- configuration layer -------------------------------------------------
+   The selected fleet's own keys. Rendered by PHP with DEFAULTS only (the selection
+   lives in localStorage, which PHP has not been told), then filled from get-config and
+   enabled — so the operator never edits, or Applies, a value that only looked stored. */
+const CRF_CFG_KEYS = <?=json_encode(crf_field_keys('fleet'))?>;
+const CRF_HOST_GB  = <?=$host_mem_gb ?: 0?>;
+function crfCfgEl(k){ const f=document.getElementById('crf-cfg-form'); return f?f.elements[k]:null; }
+/* A bare #anchor href would put the fragment in the URL, and Dynamix routes on it —
+   scroll by hand instead. */
+function crfCfgFocusSecurity(){
+  const s=document.getElementById('crf-cfg-security');
+  if(s) s.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function crfCfgLoad(){
+  const fs=document.getElementById('crf-cfg-fs'); if(!fs) return;
+  fs.disabled=true; crfCfgDirty=false;
+  crfPost({action:'get-config',layer:'fleet'}).then(d=>{
+    // get-config names the fleet it answered for. A switch while this was in flight
+    // would otherwise paint the previous fleet's values under the new fleet's name —
+    // and the next Apply would write them there.
+    if(d.fleet!==crfFleet()) return;
+    const cfg=d.cfg||{};
+    CRF_CFG_KEYS.forEach(k=>{ const el=crfCfgEl(k); if(el) el.value=(k in cfg)?cfg[k]:(CRF_DEFAULTS[k]??''); });
+    const lbl=document.getElementById('crf-cfg-for'); if(lbl) lbl.textContent=d.fleet;
+    fs.disabled=false; crfCfgAdvise();
+  }).catch(e=>{ console.error('ci-runner-farm get-config:',e); });
+}
+function crfCfgSave(){
+  const cfg={};
+  CRF_CFG_KEYS.forEach(k=>{ const el=crfCfgEl(k); if(el) cfg[k]=el.value; });
+  crfPost({action:'save-config',layer:'fleet',cfg:JSON.stringify(cfg)}).then(o=>{
+    if(o.ok===false){ crfToast('Save failed'+(o.error?': '+o.error:'')); return; }
+    crfCfgDirty=false;
+    crfToast('Configuration saved');
+    // The reconciler is already running; the status poll paints its "migrating" count.
+    crfRefresh(); crfFleetList();
+  }).catch(e=>{ crfToast('Save failed'); console.error('ci-runner-farm save-config:',e); });
+}
+/* Client-side only — nothing reaches flash until Apply. */
+function crfCfgReset(){
+  CRF_CFG_KEYS.forEach(k=>{ const el=crfCfgEl(k); if(el) el.value=CRF_DEFAULTS[k]??''; });
+  crfCfgDirty=true; crfCfgAdvise();
+}
+/* The remote image ref is meaningless on a built-in fleet — hide it (and its help)
+   rather than leaving a field that is silently ignored. */
+function crfCfgImgSrc(){
+  const sel=crfCfgEl('IMAGE_SOURCE'), row=document.querySelector('#crf-cfg [data-key="IMAGE"]');
+  if(!sel||!row) return;
+  const show=sel.value==='remote', disp=show?'':'none';
+  row.style.display=disp;
+  const help=row.nextElementSibling;
+  if(help&&help.classList.contains('inline_help')) help.style.display=disp;
+}
+/* Two advisories, both worth more than the number they sit next to: an autoscale range
+   that can never settle, and a fleet whose worst-case memory exceeds the box. Docker's
+   -m accepts a unit suffix, so "512m" is half a gig, not 512 GB; a bare number is read
+   as GB to match the rest of this form's convention. */
+function crfCfgParseGb(v){
+  const m=String(v||'').trim().match(/^([0-9]*\.?[0-9]+)\s*([kmgt]?)b?$/i);
+  return m ? parseFloat(m[1])*({k:1/1048576,m:1/1024,g:1,t:1024}[(m[2]||'g').toLowerCase()]||1) : 0;
+}
+function crfCfgAdvise(){
+  crfCfgImgSrc();
+  const min=crfCfgEl('AUTOSCALE_MIN'), max=crfCfgEl('AUTOSCALE_MAX'), w=document.getElementById('crf-cfg-aswarn');
+  if(min&&max&&w) w.classList.toggle('on',(+min.value||0)>(+max.value||0));
+  const mem=crfCfgEl('RUNNER_MEMORY'), cnt=crfCfgEl('RUNNER_COUNT'), as=crfCfgEl('AUTOSCALE'), n=document.getElementById('crf-cfg-memwarn');
+  if(!mem||!cnt||!n||!CRF_HOST_GB) return;
+  const g=crfCfgParseGb(mem.value);
+  const runners=(as&&as.value==='true')?(+((max||{}).value)||0):(+cnt.value||0);
+  const worst=g*runners, fmt=x=>x.toFixed(1).replace(/\.0$/,'');
+  n.textContent='Worst case '+runners+' × '+fmt(g)+'g = '+fmt(worst)+'g of this host’s '+CRF_HOST_GB+'g — '+fmt(CRF_HOST_GB-worst)+'g left for everything else. These are caps, not reservations.';
+  n.classList.toggle('on',worst>CRF_HOST_GB*0.8);
+}
+(function(){
+  const f=document.getElementById('crf-cfg-form'); if(!f) return;
+  ['input','change'].forEach(ev=>f.addEventListener(ev,()=>{ crfCfgDirty=true; crfCfgAdvise(); }));
+})();
+crfCfgLoad();
 
 function crfElapsed(iso){
   const t=Date.parse(iso); if(isNaN(t)) return null;
@@ -436,10 +632,14 @@ function crfPosture(d){
     // status-json carries none of those distinctions, so "Checked: X" would be a
     // claim the engine cannot back, and a green tick is the worst place to guess.
     lvl='clear'; title='Nothing reported';
-    body='<div class="crf-pf crf-muted">No public-repository or cache-root problem has been reported for this fleet. The rest of its security settings live on the Settings tab.</div>';
+    body='<div class="crf-pf crf-muted">No public-repository or cache-root problem has been reported for this fleet.</div>';
   }
   el.className='crf-posture crf-p-'+lvl;
-  el.innerHTML='<b>'+title+'</b>'+body;
+  // The call to action M2 could only state as prose: the security section it names is
+  // on this page now, holding the keys (DinD, docker.sock, network isolation) whose
+  // values these findings are about.
+  el.innerHTML='<b>'+title+'</b>'+body+
+    '<div class="crf-pf"><a href="#crf-cfg-security" onclick="crfCfgFocusSecurity();return false;">Review this fleet&rsquo;s security settings</a></div>';
 }
 const CRF_PHASE_LABEL={busy:'Busy',idle:'Idle',error:'Error',starting:'Starting'};
 /* The engine's vocabulary, not a prettier one: the fleet log and the drawer speak
