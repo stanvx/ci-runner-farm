@@ -38,6 +38,39 @@ RUN printf '%s\n' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh
 
+# Privilege drop for scale-set mode. The base image entrypoint is what honours
+# RUN_AS_ROOT=false, and the scale-set entrypoint below replaces it wholesale, so
+# without this every scale-set job would run as root while the setting still read
+# "false" in the UI — and root-owned files would land in the CACHE_MOUNTS dirs that
+# ensure_dirs chowns to RUNNER_UID for the legacy fleets sharing them.
+#
+# Split from jit-entrypoint.sh because ordering matters: dockerd must start as root,
+# so this runs on the far side of wait-docker.sh and drops privileges only for the
+# runner itself. The chown set mirrors the base entrypoint's, including its reason
+# for skipping bin/ and externals/ (~380 MB, and recursing forces an overlay copy-up
+# per file even where ownership already matches).
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -uo pipefail' \
+  '# Match the docker group to the socket that is actually mounted, else the runner' \
+  '# user cannot reach it. Runs here, not earlier, because under DinD the socket does' \
+  '# not exist until dockerd has started.' \
+  'if [ -e /var/run/docker.sock ]; then' \
+  '  sockgid="$(stat -c "%g" /var/run/docker.sock 2>/dev/null)"' \
+  '  curgid="$(getent group docker | cut -d: -f3 2>/dev/null)"' \
+  '  if [ -n "$sockgid" ] && [ "$sockgid" != "$curgid" ]; then' \
+  '    groupmod -g "$sockgid" docker 2>/dev/null || true' \
+  '  fi' \
+  'fi' \
+  '# A tmpfs /_work mounts root-owned, so the non-root runner cannot write its own' \
+  '# work dir without this.' \
+  'chown runner /actions-runner "${RUNNER_WORKDIR:-/_work}" 2>/dev/null || true' \
+  'find /actions-runner -mindepth 1 -maxdepth 1 ! -name bin ! -name externals -exec chown -R runner {} + 2>/dev/null || true' \
+  'chown runner /opt/hostedtoolcache/ 2>/dev/null || true' \
+  'exec /usr/sbin/gosu runner "$@"' \
+  > /usr/local/bin/crf-drop-privs.sh \
+ && chmod 0755 /usr/local/bin/crf-drop-privs.sh
+
 # Scale-set entrypoint. A scale-set fleet has no registration token: GitHub mints a
 # just-in-time config per assigned job, and ci-runner-farm bind-mounts it read-only and
 # names it in CRF_JITCONFIG_FILE. This replaces the base image entrypoint entirely (its
@@ -57,6 +90,14 @@ RUN printf '%s\n' \
   '# --jitconfig is how the runner takes a scale-set config. WorkFolder inside it is set' \
   '# to /_work host-side, so nothing here has to place the work dir.' \
   'set -- ./bin/Runner.Listener run --jitconfig "$(cat "$CRF_JITCONFIG_FILE")"' \
+  '# Honour RUN_AS_ROOT ourselves: the entrypoint that used to do it is the one we' \
+  '# replaced. Refuse rather than silently running jobs as root when the drop is' \
+  '# impossible — a setting that reads "false" while doing the opposite is worse than' \
+  '# a container that fails loudly on first start.' \
+  'if [ "${RUN_AS_ROOT:-false}" != "true" ]; then' \
+  '  [ -x /usr/sbin/gosu ] || { echo "jit-entrypoint: RUN_AS_ROOT=false but /usr/sbin/gosu is missing from this image — refusing to run jobs as root" >&2; exit 1; }' \
+  '  set -- /usr/local/bin/crf-drop-privs.sh "$@"' \
+  'fi' \
   '# We replaced the entrypoint that used to launch dockerd, so route through the same' \
   '# wrapper the legacy CMD uses when docker-in-docker is on: without it the first job' \
   '# step races a cold daemon and fails "Cannot connect to the Docker daemon".' \
