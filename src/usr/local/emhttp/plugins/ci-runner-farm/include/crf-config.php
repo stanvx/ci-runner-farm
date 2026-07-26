@@ -14,6 +14,7 @@
 
 const CRF_PLUGIN  = 'ci-runner-farm';
 const CRF_CFGDIR  = '/boot/config/plugins/' . CRF_PLUGIN;
+const CRF_RUNDIR  = '/var/local/emhttp/' . CRF_PLUGIN;
 const CRF_ENGINE  = '/usr/local/emhttp/plugins/' . CRF_PLUGIN . '/include/runner-farm.sh';
 
 /* Single source of truth for every form field's default, on the PHP side. Drives the
@@ -71,22 +72,58 @@ function crf_cfg_read($fleet, $layer) {
   return array_intersect_key($cur, array_flip(crf_layer_keys($layer)));
 }
 
-/* Rewrite only the given keys, in place, leaving every other line of the file alone.
+/* Rewrite only the given keys, leaving every other line of the file alone.
    MERGE, not replace: fleet `default`'s cfg holds BOTH layers, so a global save that
    rebuilt the file from its own fields would silently delete every per-fleet key (and
-   vice versa). Comments, ordering and unknown keys survive untouched. */
-function crf_cfg_merge($file, array $kv) {
-  $lines = is_file($file) ? file($file, FILE_IGNORE_NEW_LINES) : [];
-  $seen  = [];
-  foreach ($lines as $i => $l) {
-    if (!preg_match('/^([A-Za-z_][A-Za-z0-9_]*)=/', $l, $m)) continue;
-    if (!array_key_exists($m[1], $kv)) continue;
-    $lines[$i] = $m[1] . '="' . $kv[$m[1]] . '"';
-    $seen[$m[1]] = true;
+   vice versa). Comments, ordering and unknown keys survive untouched.
+
+   Saves are serialized because the global and default-fleet forms share one file. A
+   direct read/modify/write lets two browser requests each read the old file and the
+   last writer erase the other layer's changes. The lock lives in tmpfs, while the
+   replacement file is written beside the cfg so rename is atomic on the USB flash. */
+function crf_cfg_merge($file, array $kv, $lockFile = null) {
+  $lockFile = $lockFile ?: CRF_RUNDIR . '/config.lock';
+  @mkdir(dirname($lockFile), 0755, true);
+  $lock = @fopen($lockFile, 'c');
+  if ($lock === false || !@flock($lock, LOCK_EX)) {
+    if ($lock !== false) @fclose($lock);
+    return false;
   }
-  foreach ($kv as $k => $v) if (empty($seen[$k])) $lines[] = $k . '="' . $v . '"';
-  @mkdir(dirname($file), 0755, true);
-  return file_put_contents($file, implode("\n", $lines) . "\n") !== false;
+
+  $tmp = null;
+  try {
+    $lines = is_file($file) ? file($file, FILE_IGNORE_NEW_LINES) : [];
+    if ($lines === false) return false;
+    $seen = [];
+    foreach ($lines as $i => $l) {
+      if (!preg_match('/^([A-Za-z_][A-Za-z0-9_]*)=/', $l, $m)) continue;
+      if (!array_key_exists($m[1], $kv)) continue;
+      $lines[$i] = $m[1] . '="' . $kv[$m[1]] . '"';
+      $seen[$m[1]] = true;
+    }
+    foreach ($kv as $k => $v) if (empty($seen[$k])) $lines[] = $k . '="' . $v . '"';
+
+    @mkdir(dirname($file), 0755, true);
+    $tmp = @tempnam(dirname($file), basename($file) . '.tmp.');
+    if ($tmp === false) return false;
+    $mode = is_file($file) ? (fileperms($file) & 0777) : 0644;
+    if (@file_put_contents($tmp, implode("\n", $lines) . "\n") === false) return false;
+    @chmod($tmp, $mode);
+    if (!@rename($tmp, $file)) return false;
+    $tmp = null;
+
+    // Do not tell the UI that flash persistence succeeded until the values round-trip.
+    $saved = @parse_ini_file($file, false, INI_SCANNER_RAW);
+    if (!is_array($saved)) return false;
+    foreach ($kv as $k => $v) {
+      if (!array_key_exists($k, $saved) || (string)$saved[$k] !== (string)$v) return false;
+    }
+    return true;
+  } finally {
+    if ($tmp !== null) @unlink($tmp);
+    @flock($lock, LOCK_UN);
+    @fclose($lock);
+  }
 }
 
 /* A value is written as KEY="value" and read back by a parser that strips one pair of

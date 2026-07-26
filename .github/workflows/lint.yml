@@ -53,6 +53,9 @@ jobs:
       - name: Config parity
         run: bash tests/config-parity.sh
 
+      - name: Config merge persistence
+        run: php tests/config-merge.php
+
       - name: Path guards
         run: bash tests/safe-paths.sh
 
