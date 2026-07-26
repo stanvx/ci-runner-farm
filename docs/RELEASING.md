@@ -69,7 +69,8 @@ ownership, and `gzip -9n`. Those flags are applied **only under GNU tar**, so a
 - The diff to `ci-runner-farm.plg` is version entities only. Any change to the
   install/remove `<INLINE>` scripts means a source change rode along; those
   scripts run as root on every user's server.
-- If `default.cfg`, the engine defaults, or `RunnerFarmSettings.page` changed,
+- If `default.cfg`, the engine defaults, `include/crf-config.php` or
+  `include/crf-fields.php` changed,
   `config-parity` passed (see `/add-config-key`).
 - `pluginURL` / `packageURL` point at the repo you intend to publish from
   (`build-plg.sh` takes `REPO` from `${{ github.repository }}` in CI).

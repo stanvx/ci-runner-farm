@@ -2358,7 +2358,10 @@ case "${1:-status}" in
   stats-json)   cmd_stats_json ;;
   stats-refresh) cmd_stats_refresh ;;
   recycle)      with_fleet_lock wait cmd_recycle "${2:?usage: recycle <name>}" ;;
-  reconcile-config) cmd_reconcile_config ;;
+  # Same fan-out shape as boot-autostart: a GLOBAL key (cache root, shared mirror) is
+  # baked into every fleet's runners, so a global save must reconcile all of them, not
+  # just whichever fleet the browser happened to have selected.
+  reconcile-config) if [ "$FLEET_EXPLICIT" = 1 ]; then cmd_reconcile_config; else for_each_fleet reconcile-config; fi ;;
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$FARM_LOG"; exit 0; }; cmd_reconcile_drain ) 7>"$RECONCILE_LOCK" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;

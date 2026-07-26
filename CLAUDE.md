@@ -18,10 +18,24 @@ if they drift:
 
 1. `include/runner-farm.sh` — the `# ---- defaults` block (runtime authority)
 2. `default.cfg` — operator-facing documentation (reference only, never copied to flash)
-3. `RunnerFarmSettings.page` — the `$defaults` PHP array (form fallback + Reset)
+3. `include/crf-config.php` — the `$crf_defaults` PHP array (form fallback + Reset)
+
+A key must also be rendered as a form field in `include/crf-fields.php`, in the
+table matching its engine layer: `global` (host-wide, Settings tab) or `fleet`
+(per fleet, Fleet tab). The parity test checks each table against the engine's
+`GLOBAL_KEYS` / `FLEET_KEYS`, because a field in the wrong table writes to the
+wrong cfg file and is then silently ignored.
 
 Engine-only keys must be added to `ENGINE_ONLY_IN_CFG` in the test. See
 `/add-config-key`.
+
+## Config is two layers, and neither form uses `/update.php`
+
+`GLOBAL_KEYS` live in the legacy cfg; `FLEET_KEYS` live in `fleets/<name>.cfg`.
+Fleet `default` IS the legacy cfg, so that one file holds **both** layers — which
+is why saves go through `exec.php`'s `save-config` (which merges) instead of
+Unraid's `/update.php` (one hardcoded `#file`, rebuilt from the posted fields).
+A whole-file rewrite from either form would delete the other layer.
 
 ## Commands
 
@@ -49,10 +63,6 @@ Full process: @docs/RELEASING.md. The rules that matter while editing:
 
 ## Gotchas
 
-- `deploy.sh` is stale: it scp's only `RunnerFarm.page`, `RunnerFarmDashboard.page`,
-  `default.cfg`, `default.Dockerfile`, `README.md`. Editing `RunnerFarmFleet.page`,
-  `RunnerFarmImage.page`, `RunnerFarmSettings.page`, or `event/` and running it
-  deploys nothing.
 - The `.plg` embeds nothing: it downloads `ci-runner-farm.tgz` by URL and verifies
   it by MD5. `README.md`'s layout block is otherwise stale — trust `build-plg.sh`.
 - Caches go to `RUNDIR=/var/local/emhttp/ci-runner-farm` (tmpfs), never flash —

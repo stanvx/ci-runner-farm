@@ -276,15 +276,17 @@ release-please-config.json         release-please configuration
 VERSION                            mirror of the internal SemVer version
 src/usr/local/emhttp/plugins/ci-runner-farm/   mirrors the install path exactly
   RunnerFarm.page                  xmenu container (Settings -> Utilities)
-  RunnerFarmFleet.page             Fleet tab — run and watch
+  RunnerFarmFleet.page             Fleet tab — run, watch, and configure the fleet
   RunnerFarmImage.page             Runner image tab — build
-  RunnerFarmSettings.page          Settings tab — configure
+  RunnerFarmSettings.page          Settings tab — host-wide config + tokens
   RunnerFarmDashboard.page         optional Dashboard widget
   default.cfg                      reference defaults (not seeded to flash)
   default.Dockerfile               generic starter runner image
   include/runner-farm.sh           engine: provisioning/control script
   include/exec.php                 CSRF-guarded web endpoint
   include/crf-core.php             shared JS core + .crf-* styles
+  include/crf-config.php           $crf_defaults + the two cfg layers
+  include/crf-fields.php           form field tables (global / fleet) + renderer
   nchan/ci_runner_farm             Dashboard push channel
   event/                           emhttpd docker start/stop hooks
 tests/

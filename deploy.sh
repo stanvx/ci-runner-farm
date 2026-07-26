@@ -12,11 +12,14 @@ DEST="/usr/local/emhttp/plugins/${NAME}"
 cd "$(dirname "$0")"
 
 echo "[deploy] syncing $SRC -> $HOST:$DEST"
-ssh "$HOST" "mkdir -p '$DEST/include'"
-scp -q "$SRC/RunnerFarm.page" "$SRC/RunnerFarmDashboard.page" "$SRC/default.cfg" "$SRC/default.Dockerfile" "$SRC/README.md" "$HOST:$DEST/"
-ssh "$HOST" "mkdir -p '$DEST/nchan'"
+ssh "$HOST" "mkdir -p '$DEST/include' '$DEST/nchan' '$DEST/event'"
+# Globs, not a hand-maintained list: this used to name five files, so editing any other
+# tab and deploying silently shipped nothing. src/ is a byte-for-byte image of $DEST
+# (build-plg.sh tars it wholesale), so copying all of it is also the accurate thing.
+scp -q "$SRC"/*.page "$SRC"/default.cfg "$SRC"/default.Dockerfile "$SRC"/README.md "$HOST:$DEST/"
 scp -q "$SRC"/nchan/* "$HOST:$DEST/nchan/"
 scp -q "$SRC"/include/* "$HOST:$DEST/include/"
+scp -q "$SRC"/event/* "$HOST:$DEST/event/"
 
 echo "[deploy] enforcing root:root + perms on $HOST"
 ssh "$HOST" "
@@ -25,5 +28,6 @@ ssh "$HOST" "
   find '$DEST' -type f -exec chmod 0644 {} +
   chmod 0755 '$DEST/include/runner-farm.sh'
   find '$DEST/nchan' -type f -exec chmod 0755 {} + 2>/dev/null || true  # monitor_nchan execs the publisher
+  find '$DEST/event' -type f -exec chmod 0755 {} + 2>/dev/null || true  # emhttp_event execs these
   echo '[deploy] done:'; ls -la '$DEST'
 "
