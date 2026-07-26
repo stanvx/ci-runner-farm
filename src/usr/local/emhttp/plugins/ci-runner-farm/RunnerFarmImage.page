@@ -7,12 +7,14 @@ include_once '/usr/local/emhttp/plugins/ci-runner-farm/include/crf-core.php';
 /* Runner image builder tab: image status band, ACE-powered Dockerfile editor
    (core dynamix ships ace with a dockerfile mode), and the build pipeline.
    The crf* JS core + .crf-* styles come from include/crf-core.php (above, shared
-   by all tabs via include_once). */
+   by all tabs via include_once).
+   The Dockerfile is per-fleet, but the selected fleet lives in localStorage,
+   which PHP has not been told — so PHP cannot know which fleet's file to read
+   and the editor MUST load via crfiLoadDf() on first paint. We render an empty
+   hidden textarea here purely as the no-ACE fallback's DOM hook; ACE itself is
+   initialised from the (empty) textarea and then populated by the load. */
 $crf_plugin = 'ci-runner-farm';
-$crf_df     = "/boot/config/plugins/$crf_plugin/Dockerfile";
-$crf_df_saved = is_file($crf_df);
-if (!$crf_df_saved) $crf_df = "/usr/local/emhttp/plugins/$crf_plugin/default.Dockerfile";
-$crf_dockerfile = is_file($crf_df) ? file_get_contents($crf_df) : '';
+$crf_dockerfile = '';
 
 /* Toolchain install blocks the Runner image tab can splice into the Dockerfile.
    Nowdoc keeps $ and backslashes literal; delimited markers make add/remove
@@ -184,12 +186,13 @@ let crfiAce=null, crfiSaved='';
    re-measure when the Runner image sub-tab (tab2) is shown. */
 document.getElementById('tab2') && document.getElementById('tab2').addEventListener('click',()=>{ setTimeout(()=>{ if(crfiAce) crfiAce.resize(true); },60); });
 crfiSyncTC();
-/* The editable Dockerfile is PER FLEET, but this page's initial contents are
-   rendered server-side from the default fleet's path. Without this, selecting
-   another fleet on the Fleet tab would leave the editor showing default's
-   Dockerfile while Save wrote it over the selected fleet's — silent data loss with
-   no visible symptom. Re-load whenever the selection is not default, and whenever
-   it changes (crfSetFleet dispatches crf-fleet-change). */
+/* The editable Dockerfile is PER FLEET, but the selection lives in localStorage
+   which the server can't see — so this page's first paint has no idea which
+   fleet's file to read. Without this, opening the Runner image tab on a non-default
+   fleet would show default's Dockerfile in the editor while Save wrote the new
+   contents over the selected fleet's file — silent data loss with no visible
+   symptom. Always re-load on first paint, and whenever the selection changes
+   (crfSetFleet dispatches crf-fleet-change). */
 function crfiLoadDf(){
   crfPost({action:'get-dockerfile'}).then(d=>{
     if(typeof d.dockerfile!=='string') return;
@@ -200,9 +203,9 @@ function crfiLoadDf(){
     const p=document.getElementById('crfi-df-path');
     if(p&&d.path) p.textContent=d.path+(d.saved?'':' (shipped default — not saved yet)');
     crfiSyncTC();
-  }).catch(e=>{ console.error('ci-runner-farm get-dockerfile:',e); });
+  }).catch(e=>{ if(e&&e.__crfStale) return; console.error('ci-runner-farm get-dockerfile:',e); });
 }
-if(crfFleet()!=='default') crfiLoadDf();
+crfiLoadDf();
 document.addEventListener('crf-fleet-change',crfiLoadDf);
 function crfiResetDf(){
   crfPost({action:'get-default-dockerfile'}).then(d=>{
@@ -210,7 +213,7 @@ function crfiResetDf(){
     crfiSet(d.dockerfile);  // via crfiSet so the dirty marker updates in both the ACE and textarea-fallback paths
     document.getElementById('crf-build-status').textContent='shipped default loaded — not saved yet';
     crfiSyncTC();
-  }).catch(e=>{ document.getElementById('crf-build-status').textContent='could not load default — see console'; console.error('ci-runner-farm reset:',e); });
+  }).catch(e=>{ if(e&&e.__crfStale) return; document.getElementById('crf-build-status').textContent='could not load default — see console'; console.error('ci-runner-farm reset:',e); });
 }
 // NOTE: the toolchain install blocks + their splice/idempotency logic are a
 // BROWSER-ONLY convenience of the image builder — there is no engine (runner-farm.sh
@@ -255,9 +258,13 @@ function crfiBuildState(state,msg){
 }
 function crfSaveDf(cb){ crfPost({action:'save-dockerfile',dockerfile:document.getElementById('crf-dockerfile').value}).then(o=>{
   if(o.ok){ crfiSaved=document.getElementById('crf-dockerfile').value; document.getElementById('crfi-dirty').classList.remove('on');
-    document.getElementById('crfi-df-path').textContent='/boot/config/plugins/ci-runner-farm/Dockerfile'; }
+    // The path the engine just wrote is per-fleet: default → ci-runner-farm/Dockerfile,
+    // others → fleets/<name>.Dockerfile (exec.php: dockerfile_path). Compute the
+    // same shape here so the label is right without a second round-trip.
+    const f=crfFleet(), base='/boot/config/plugins/ci-runner-farm';
+    document.getElementById('crfi-df-path').textContent=(f==='default'?base+'/Dockerfile':base+'/fleets/'+f+'.Dockerfile'); }
   crfiBuildState(o.ok?'ok':'err', o.ok?'saved':('error: '+(o.error||'')));
-  if(typeof cb==='function') cb(!!o.ok); }).catch(e=>{ crfiBuildState('err','could not save Dockerfile — see console'); console.error('ci-runner-farm save-dockerfile:',e); if(typeof cb==='function') cb(false); }); }
+  if(typeof cb==='function') cb(!!o.ok); }).catch(e=>{ if(e&&e.__crfStale) return; crfiBuildState('err','could not save Dockerfile — see console'); console.error('ci-runner-farm save-dockerfile:',e); if(typeof cb==='function') cb(false); }); }
 function crfBuild(){
   // Re-entrancy guard: a build (and its poll loop) is already live. Without this, a
   // second Save+Build while a build runs would save the Dockerfile (clearing the dirty

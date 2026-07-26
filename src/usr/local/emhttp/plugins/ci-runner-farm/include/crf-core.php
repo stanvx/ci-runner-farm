@@ -152,7 +152,19 @@ function crfPost(p){
       // real data, making the fleet look empty and buttons silently no-op. Reject
       // instead, so callers' .catch paints "connection lost / reload".
       if(!r.ok) throw new Error('http '+r.status+(r.status===403?' — session expired, reload the page':'')+': '+t.slice(0,100));
-      try{ return JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); }
+      let d; try{ d=JSON.parse(t); }catch(e){ throw new Error('bad response for '+p.action+': '+t.slice(0,120)); }
+      // A request answered for one fleet that has since moved: a switch can land in
+      // the ~5s the status poll takes, and the response (carrying the previous
+      // fleet's data) would otherwise paint under the new fleet's name for one
+      // cycle. exec.php stamps `fleet` on every poll response that has one — if the
+      // stamp disagrees with what was asked, the response is stale; drop it by
+      // rejecting with a tag callers' .catch can ignore. User-initiated mutating
+      // actions (start/stop/validate) don't echo a fleet and are not subject to
+      // the race because the click is on the same tab.
+      if(d&&typeof d==='object'&&typeof d.fleet==='string'&&d.fleet!==p.fleet){
+        const e=new Error('stale'); e.__crfStale=true; throw e;
+      }
+      return d;
     }));
 }
 /* Copy text to the clipboard, feature-detecting the async Clipboard API (absent

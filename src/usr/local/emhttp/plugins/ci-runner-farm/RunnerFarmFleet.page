@@ -510,15 +510,16 @@ function crfCfgLoad(){
   const fs=document.getElementById('crf-cfg-fs'); if(!fs) return;
   fs.disabled=true; crfCfgDirty=false;
   crfPost({action:'get-config',layer:'fleet'}).then(d=>{
-    // get-config names the fleet it answered for. A switch while this was in flight
-    // would otherwise paint the previous fleet's values under the new fleet's name —
-    // and the next Apply would write them there.
-    if(d.fleet!==crfFleet()) return;
+    // crfPost drops a response whose `fleet` field disagrees with the request —
+    // a switch while the request was in flight would otherwise paint the previous
+    // fleet's values under the new fleet's name, and the next Apply would write
+    // them there. The label reads d.fleet (not crfFleet()) for the same reason:
+    // the response is the truth of which fleet answered.
     const cfg=d.cfg||{};
     CRF_CFG_KEYS.forEach(k=>{ const el=crfCfgEl(k); if(el) el.value=(k in cfg)?cfg[k]:(CRF_DEFAULTS[k]??''); });
     const lbl=document.getElementById('crf-cfg-for'); if(lbl) lbl.textContent=d.fleet;
     fs.disabled=false; crfCfgAdvise();
-  }).catch(e=>{ console.error('ci-runner-farm get-config:',e); });
+  }).catch(e=>{ if(e&&e.__crfStale) return; console.error('ci-runner-farm get-config:',e); });
 }
 function crfCfgSave(){
   const cfg={};
@@ -803,6 +804,11 @@ function crfRefresh(){
     }).join('');
     crfDrawerMount();
   }).catch(e=>{
+    // A dropped status poll because the selection moved while it was in flight is
+    // crfPost's stale-reject (e.__crfStale): the next poll is already underway for
+    // the right fleet. Paint nothing, log nothing — the real fleet's data will
+    // arrive in < 5s.
+    if(e&&e.__crfStale) return;
     // A rejected status poll (network down, or a 403 from a CSRF token that expired
     // on a reboot/array restart) must NOT look like an empty fleet — surface it in
     // the warning banner and keep the last-rendered bays in place. Cleared by the
