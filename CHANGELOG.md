@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/stanvx/ci-runner-farm/compare/v1.8.0...v1.9.0) (2026-07-26)
+
+
+### Features
+
+* **scaleset:** GitHub Runner Scale Sets — engine verbs, crf-scalesetd listener, and its release pipeline ([#22](https://github.com/stanvx/ci-runner-farm/issues/22)) ([3559914](https://github.com/stanvx/ci-runner-farm/commit/3559914507b39569360913c4dced2529851289e0))
+
+
+### Bug Fixes
+
+* wire credential checks and fork release docs ([558d5b1](https://github.com/stanvx/ci-runner-farm/commit/558d5b141ae6ce276dd967c0e3b0446043d55515))
+
 ## [1.8.0](https://github.com/stanvx/ci-runner-farm/compare/v1.7.0...v1.8.0) (2026-07-26)
 
 
