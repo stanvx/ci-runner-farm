@@ -56,6 +56,22 @@ function last_json($out) {
   $last = $lines ? trim(end($lines)) : '';
   return (strlen($last) && $last[0] === '{') ? $last : '';
 }
+// Stamp the fleet onto a poll response so the client can drop a request whose
+// fleet moved while it was in flight. Only used for responses that travel
+// through crfPost (the polled actions, not user-initiated mutating ones — those
+// carry a single {ok,error?} verdict and have no fleet-switch race because the
+// operator triggered them and is still on the same tab). Engine stdout is a
+// JSON object; if it isn't, fall back to an object envelope rather than emit
+// garbage, so the client's JSON.parse never explodes on a docker warning.
+function with_fleet($out, $fleet) {
+  $body = json_decode($out, true);
+  if (!is_array($body)) $body = [];
+  // Don't overwrite if the engine already echoed fleet (defence in depth — only
+  // the engine verb `status-json` does, and exec.php doesn't currently call it
+  // for it; harmless if a future verb learns to).
+  if (!array_key_exists('fleet', $body)) $body['fleet'] = $fleet;
+  return json_encode($body);
+}
 
 switch ($action) {
   case 'status-json':
@@ -64,9 +80,10 @@ switch ($action) {
     // the backend script itself failed (missing/non-executable/crash) — not a real
     // empty fleet — so on a non-zero exit surface an HTTP error, which makes crfPost
     // reject and the UI show "lost connection" instead of a misleading "No managed
-    // runners" card.
-    if      ($out !== '') { echo $out; }
-    elseif  ($rc === 0)   { echo json_encode(['count'=>0,'runners'=>[]]); }
+    // runners" card. Stamp the fleet so crfPost can drop a response whose fleet
+    // changed while the request was in flight.
+    if      ($out !== '') { echo with_fleet($out, $fleet); }
+    elseif  ($rc === 0)   { echo json_encode(['fleet'=>$fleet,'count'=>0,'runners'=>[]]); }
     else                  { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'backend unavailable']); }
     break;
 
@@ -124,7 +141,7 @@ switch ($action) {
     // editor falls back to, so the client can label the path it would actually write.
     $saved = is_file($df);
     if (!$saved) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
-    echo json_encode(['ok' => true, 'saved' => $saved, 'path' => dockerfile_path($CFGDIR, $fleet), 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
+    echo json_encode(['ok' => true, 'fleet' => $fleet, 'saved' => $saved, 'path' => dockerfile_path($CFGDIR, $fleet), 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
 
   case 'save-dockerfile':
@@ -144,17 +161,17 @@ switch ($action) {
 
   case 'queued-json':
     [$out, $rc] = run_json($CMD . ' queued-json');
-    echo $out !== '' ? $out : json_encode(['queued' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'queued' => -1]);
     break;
 
   case 'stats-json':
     [$out, $rc] = run_json($CMD . ' stats-json');
-    echo $out !== '' ? $out : json_encode(['total' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'total' => -1]);
     break;
 
   case 'cache-usage':
     [$out, $rc] = run_json($CMD . ' cache-usage-json');
-    echo $out !== '' ? $out : json_encode(['total' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'total' => -1]);
     break;
 
   case 'cache-clear':
@@ -186,7 +203,7 @@ switch ($action) {
 
   case 'image-info':
     [$out, $rc] = run_json($CMD . ' image-info-json');
-    echo $out !== '' ? $out : json_encode(['exists' => false]);
+    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'exists' => false]);
     break;
 
   case 'get-default-dockerfile':
