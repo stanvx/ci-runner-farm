@@ -10,7 +10,7 @@ $csrf = $var['csrf_token'] ?? '';
 $given = $_REQUEST['csrf_token'] ?? '';
 if (!$csrf || !hash_equals($csrf, $given)) {
   http_response_code(403);
-  echo json_encode(['ok' => false, 'error' => 'csrf']);
+  echo crf_json(['ok' => false, 'error' => 'csrf']);
   exit;
 }
 
@@ -28,7 +28,7 @@ $action  = $_REQUEST['action'] ?? 'status-json';
 $fleet = $_REQUEST['fleet'] ?? 'default';
 if (!preg_match(CRF_FLEET_RE, $fleet)) {
   http_response_code(400);
-  echo json_encode(['ok' => false, 'error' => 'bad fleet']);
+  echo crf_json(['ok' => false, 'error' => 'bad fleet']);
   exit;
 }
 // Every invocation carries the fleet, so the engine never falls back to `default` by
@@ -43,19 +43,57 @@ function dockerfile_path($cfgdir, $fleet) {
   return $fleet === 'default' ? "$cfgdir/Dockerfile" : "$cfgdir/fleets/$fleet.Dockerfile";
 }
 
-function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [implode("\n", $out), $rc]; }
+// Adapted from upstream #59; include this fork's named PAT and GitHub App files.
+function crf_secret_values($cfgdir) {
+  $secrets = [];
+  $files = array_merge(["$cfgdir/token", "$cfgdir/registry-token"],
+    glob("$cfgdir/credentials/*.token") ?: [], glob("$cfgdir/credentials/*.app.pem") ?: []);
+  foreach ($files as $file) {
+    $value = @file_get_contents($file);
+    if (is_string($value)) $value = rtrim($value, "\n");
+    if (is_string($value) && strlen($value) >= 4) $secrets[] = $value;
+  }
+  return $secrets;
+}
+
+// Redact decoded values so JSON escaping cannot hide a stored registry password.
+function crf_redact($value, $secrets = null) {
+  if ($secrets === null) $secrets = crf_secret_values($GLOBALS['CFGDIR'] ?? '');
+  if (is_array($value)) {
+    foreach ($value as $key => $item) $value[$key] = crf_redact($item, $secrets);
+    return $value;
+  }
+  if (!is_string($value) || $value === '') return $value;
+  foreach ($secrets as $secret) $value = str_replace($secret, '[REDACTED]', $value);
+  return preg_replace([
+    '/github_pat_[A-Za-z0-9_]{10,}/', '/gh[pousr]_[A-Za-z0-9_]{10,}/',
+    '/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/s',
+  ], '[REDACTED]', $value) ?? '';
+}
+
+function crf_json($body) {
+  return json_encode(crf_redact($body), JSON_INVALID_UTF8_SUBSTITUTE);
+}
+
+function run($cmd) { exec($cmd . ' 2>&1', $out, $rc); return [crf_redact(implode("\n", $out)), $rc]; }
 // For actions whose stdout is a JSON body the frontend parses: keep stderr OUT of
 // it, so a stray docker/system warning can't corrupt the JSON (JSON.parse would
 // throw and the consumer's .catch would silently freeze the panel). run() keeps
 // 2>&1 for the action responses where the merged log IS the payload.
-function run_json($cmd) { exec($cmd . ' 2>/dev/null', $out, $rc); return [implode("\n", $out), $rc]; }
+function run_json($cmd) {
+  exec($cmd . ' 2>/dev/null', $out, $rc);
+  $text = implode("\n", $out);
+  $body = json_decode($text, true);
+  return [is_array($body) ? crf_json($body) : crf_redact($text), $rc];
+}
 // The last non-empty stdout line, if it is a JSON object — lets an emitter print
 // progress logs then its {ok,error?} verdict as the final line and have us pass
 // that verdict through with its specific reason intact.
 function last_json($out) {
   $lines = array_values(array_filter(explode("\n", $out), fn($l) => trim($l) !== ''));
   $last = $lines ? trim(end($lines)) : '';
-  return (strlen($last) && $last[0] === '{') ? $last : '';
+  $body = json_decode($last, true);
+  return (strlen($last) && $last[0] === '{' && is_array($body)) ? crf_json($body) : '';
 }
 // Stamp the fleet onto a poll response so the client can drop a request whose
 // fleet moved while it was in flight. Only used for responses that travel
@@ -71,7 +109,7 @@ function with_fleet($out, $fleet) {
   // the engine verb `status-json` does, and exec.php doesn't currently call it
   // for it; harmless if a future verb learns to).
   if (!array_key_exists('fleet', $body)) $body['fleet'] = $fleet;
-  return json_encode($body);
+  return crf_json($body);
 }
 
 switch ($action) {
@@ -84,13 +122,13 @@ switch ($action) {
     // runners" card. Stamp the fleet so crfPost can drop a response whose fleet
     // changed while the request was in flight.
     if      ($out !== '') { echo with_fleet($out, $fleet); }
-    elseif  ($rc === 0)   { echo json_encode(['fleet'=>$fleet,'count'=>0,'runners'=>[]]); }
-    else                  { http_response_code(500); echo json_encode(['ok'=>false,'error'=>'backend unavailable']); }
+    elseif  ($rc === 0)   { echo crf_json(['fleet'=>$fleet,'count'=>0,'runners'=>[]]); }
+    else                  { http_response_code(500); echo crf_json(['ok'=>false,'error'=>'backend unavailable']); }
     break;
 
   case 'start': case 'stop': case 'restart': case 'validate':
     [$out, $rc] = run($CMD . ' ' . escapeshellarg($action));
-    echo json_encode(['ok' => $rc === 0, 'action' => $action, 'log' => $out]);
+    echo crf_json(['ok' => $rc === 0, 'action' => $action, 'log' => $out]);
     break;
 
   case 'scale':
@@ -98,57 +136,57 @@ switch ($action) {
     // hard-caps; this is defense-in-depth against a crafted POST (n=99999).
     $n = max(0, min(64, (int)($_REQUEST['n'] ?? 0)));
     [$out, $rc] = run($CMD . ' scale ' . escapeshellarg((string)$n));
-    echo json_encode(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
+    echo crf_json(['ok' => $rc === 0, 'action' => "scale $n", 'log' => $out]);
     break;
 
   case 'set-token':
     $tok = trim($_REQUEST['token'] ?? '');
-    if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    if ($tok === '') { echo crf_json(['ok'=>false,'error'=>'empty']); break; }
     // Shape-check the PAT: every GitHub token form (ghp_/gho_/ghs_/ghr_/github_pat_
     // + classic 40-char hex) is [A-Za-z0-9_] only. Rejecting anything else keeps a
     // stray quote/newline/backslash out of the curl `--config` header the engine
     // builds from this value (where it could break or inject curl directives).
     if (!preg_match('/^[A-Za-z0-9_]{20,255}$/', $tok)) {
-      echo json_encode(['ok'=>false,'error'=>'that does not look like a GitHub token (expected letters, digits, and underscores only)']); break;
+      echo crf_json(['ok'=>false,'error'=>'that does not look like a GitHub token (expected letters, digits, and underscores only)']); break;
     }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/token", $tok);
     chmod("$CFGDIR/token", 0600);
-    echo json_encode(['ok' => true, 'action' => 'set-token']);
+    echo crf_json(['ok' => true, 'action' => 'set-token']);
     break;
 
   case 'clear-token':
     @unlink("$CFGDIR/token");
-    echo json_encode(['ok' => true, 'action' => 'clear-token']);
+    echo crf_json(['ok' => true, 'action' => 'clear-token']);
     break;
 
   case 'set-registry-token':
     $tok = trim($_REQUEST['token'] ?? '');
-    if ($tok === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    if ($tok === '') { echo crf_json(['ok'=>false,'error'=>'empty']); break; }
     @mkdir($CFGDIR, 0755, true);
     file_put_contents("$CFGDIR/registry-token", $tok);
     chmod("$CFGDIR/registry-token", 0600);
-    echo json_encode(['ok' => true, 'action' => 'set-registry-token']);
+    echo crf_json(['ok' => true, 'action' => 'set-registry-token']);
     break;
 
   case 'clear-registry-token':
     @unlink("$CFGDIR/registry-token");
-    echo json_encode(['ok' => true, 'action' => 'clear-registry-token']);
+    echo crf_json(['ok' => true, 'action' => 'clear-registry-token']);
     break;
 
   case 'check-credential':
     $name = trim($_REQUEST['name'] ?? '');
     if (!preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
-      echo json_encode(['ok'=>false,'error'=>'bad credential name']); break;
+      echo crf_json(['ok'=>false,'error'=>'bad credential name']); break;
     }
     if (!is_executable($DAEMON)) {
-      echo json_encode(['ok'=>false,'error'=>'credential checker is not installed']); break;
+      echo crf_json(['ok'=>false,'error'=>'credential checker is not installed']); break;
     }
     [$out, $rc] = run(escapeshellarg($DAEMON) . ' check-credential ' . escapeshellarg($name));
     $report = json_decode($out, true);
     echo $rc === 0 && is_array($report)
-      ? json_encode(array_merge(['ok'=>true], $report))
-      : json_encode(['ok'=>false,'error'=>trim($out) ?: 'credential check failed']);
+      ? crf_json(array_merge(['ok'=>true], $report))
+      : crf_json(['ok'=>false,'error'=>trim($out) ?: 'credential check failed']);
     break;
 
   case 'get-dockerfile':
@@ -157,37 +195,37 @@ switch ($action) {
     // editor falls back to, so the client can label the path it would actually write.
     $saved = is_file($df);
     if (!$saved) $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
-    echo json_encode(['ok' => true, 'fleet' => $fleet, 'saved' => $saved, 'path' => dockerfile_path($CFGDIR, $fleet), 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
+    echo crf_json(['ok' => true, 'fleet' => $fleet, 'saved' => $saved, 'path' => dockerfile_path($CFGDIR, $fleet), 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
 
   case 'save-dockerfile':
     $content = $_REQUEST['dockerfile'] ?? '';
-    if (trim($content) === '') { echo json_encode(['ok'=>false,'error'=>'empty']); break; }
+    if (trim($content) === '') { echo crf_json(['ok'=>false,'error'=>'empty']); break; }
     $df = dockerfile_path($CFGDIR, $fleet);
     @mkdir(dirname($df), 0755, true);
     file_put_contents($df, $content);
-    echo json_encode(['ok' => true, 'action' => 'save-dockerfile']);
+    echo crf_json(['ok' => true, 'action' => 'save-dockerfile']);
     break;
 
   case 'build-image':
     // The engine owns the flock/launch state machine (build-async verb); thin shim.
     [$out, $rc] = run_json($CMD . ' build-async');
-    echo $out !== '' ? $out : json_encode(['ok'=>false,'error'=>'build launch failed']);
+    echo $out !== '' ? $out : crf_json(['ok'=>false,'error'=>'build launch failed']);
     break;
 
   case 'queued-json':
     [$out, $rc] = run_json($CMD . ' queued-json');
-    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'queued' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : crf_json(['fleet'=>$fleet,'queued' => -1]);
     break;
 
   case 'stats-json':
     [$out, $rc] = run_json($CMD . ' stats-json');
-    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'total' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : crf_json(['fleet'=>$fleet,'total' => -1]);
     break;
 
   case 'cache-usage':
     [$out, $rc] = run_json($CMD . ' cache-usage-json');
-    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'total' => -1]);
+    echo $out !== '' ? with_fleet($out, $fleet) : crf_json(['fleet'=>$fleet,'total' => -1]);
     break;
 
   case 'cache-clear':
@@ -196,47 +234,47 @@ switch ($action) {
     // pass it through so a specific reason (unsafe root / could not remove N dirs)
     // reaches the UI, else fall back to the exit-code envelope.
     $j = last_json($out);
-    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'cache-clear']);
+    echo $j !== '' ? $j : crf_json(['ok' => $rc === 0, 'action' => 'cache-clear']);
     break;
 
   case 'recycle':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match($nameRe, $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    if (!preg_match($nameRe, $n)) { echo crf_json(['ok'=>false,'error'=>'bad name']); break; }
     [$out, $rc] = run_json($CMD . ' recycle ' . escapeshellarg($n));
     // cmd_recycle emits progress logs then its {ok,error?} verdict as the final
     // stdout line; pass it through so the specific reason (removed-not-recreated,
     // preflight-aborted, no-token …) reaches the UI, else fall back to exit code.
     $j = last_json($out);
-    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'recycle']);
+    echo $j !== '' ? $j : crf_json(['ok' => $rc === 0, 'action' => 'recycle']);
     break;
 
   case 'runner-log':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match($nameRe, $n)) { echo json_encode(['ok'=>false,'error'=>'bad name']); break; }
+    if (!preg_match($nameRe, $n)) { echo crf_json(['ok'=>false,'error'=>'bad name']); break; }
     [$out, $rc] = run($CMD . ' logs-tail ' . escapeshellarg($n) . ' 150');
-    echo json_encode(['ok' => true, 'log' => $out]);
+    echo crf_json(['ok' => true, 'log' => $out]);
     break;
 
   case 'image-info':
     [$out, $rc] = run_json($CMD . ' image-info-json');
-    echo $out !== '' ? with_fleet($out, $fleet) : json_encode(['fleet'=>$fleet,'exists' => false]);
+    echo $out !== '' ? with_fleet($out, $fleet) : crf_json(['fleet'=>$fleet,'exists' => false]);
     break;
 
   case 'get-default-dockerfile':
     $df = "/usr/local/emhttp/plugins/$PLUGIN/default.Dockerfile";
-    echo json_encode(['ok' => true, 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
+    echo crf_json(['ok' => true, 'dockerfile' => is_file($df) ? file_get_contents($df) : '']);
     break;
 
   case 'farm-log':
     // engine owns the source selection + filtering (farm-log verb); thin shim.
     [$out, $rc] = run_json($CMD . ' farm-log');
-    echo $out !== '' ? $out : json_encode(['ok'=>true,'log'=>'']);
+    echo $out !== '' ? $out : crf_json(['ok'=>true,'log'=>'']);
     break;
 
   case 'build-log':
     // engine owns the liveness/rc/log parsing (build-status verb); thin shim.
     [$out, $rc] = run_json($CMD . ' build-status');
-    echo $out !== '' ? $out : json_encode(['ok'=>true,'running'=>false,'rc'=>null,'log'=>'']);
+    echo $out !== '' ? $out : crf_json(['ok'=>true,'running'=>false,'rc'=>null,'log'=>'']);
     break;
 
   // ---- config -------------------------------------------------------------
@@ -248,58 +286,58 @@ switch ($action) {
   // whole-file rewrite from one form's fields would delete the other layer outright.
   case 'get-config':
     $layer = ($_REQUEST['layer'] ?? 'fleet') === 'global' ? 'global' : 'fleet';
-    echo json_encode(['ok' => true, 'layer' => $layer, 'fleet' => $fleet, 'cfg' => crf_cfg_read($fleet, $layer)]);
+    echo crf_json(['ok' => true, 'layer' => $layer, 'fleet' => $fleet, 'cfg' => crf_cfg_read($fleet, $layer)]);
     break;
 
   case 'save-config':
     $layer = ($_REQUEST['layer'] ?? 'fleet') === 'global' ? 'global' : 'fleet';
     $in = json_decode($_REQUEST['cfg'] ?? '', true);
-    if (!is_array($in)) { echo json_encode(['ok'=>false,'error'=>'bad config payload']); break; }
+    if (!is_array($in)) { echo crf_json(['ok'=>false,'error'=>'bad config payload']); break; }
     $file = crf_cfg_file($fleet, $layer);
     // A fleet's cfg is created by fleet-create and removed by fleet-delete. Refusing to
     // create one here means a stale browser tab pointing at a deleted fleet cannot
     // resurrect it as a half-configured ghost the rail would then list.
     if (!is_file($file) && !($layer === 'global' || $fleet === 'default')) {
-      echo json_encode(['ok'=>false,'error'=>'no such fleet']); break;
+      echo crf_json(['ok'=>false,'error'=>'no such fleet']); break;
     }
     // Allowlist by the ENGINE's own key list for this layer, so a crafted POST can
     // neither write a key the engine ignores nor cross a value into the other layer.
     $kv = [];
     foreach (crf_layer_keys($layer) as $k) if (array_key_exists($k, $in)) $kv[$k] = crf_cfg_clean($in[$k]);
-    if (!$kv) { echo json_encode(['ok'=>false,'error'=>'nothing to save']); break; }
-    if (!crf_cfg_merge($file, $kv)) { echo json_encode(['ok'=>false,'error'=>'could not write the config']); break; }
+    if (!$kv) { echo crf_json(['ok'=>false,'error'=>'nothing to save']); break; }
+    if (!crf_cfg_merge($file, $kv)) { echo crf_json(['ok'=>false,'error'=>'could not write the config']); break; }
     // Same follow-up the settings form's #command used to run: migrate any RUNNING
     // runner still on the previous baked config onto the new one, draining busy runners
     // so no in-flight job is killed. Detaches instantly (cmd_reconcile_config).
     // A global key is baked into EVERY fleet's runners, so that save reconciles without
     // --fleet, which the engine fans out over all of them.
     run(($layer === 'global' ? escapeshellarg($SCRIPT) : $CMD) . ' reconcile-config');
-    echo json_encode(['ok' => true, 'action' => 'save-config', 'layer' => $layer, 'saved' => count($kv)]);
+    echo crf_json(['ok' => true, 'action' => 'save-config', 'layer' => $layer, 'saved' => count($kv)]);
     break;
 
   case 'fleets-json':
     // Fleet list is host-wide: no --fleet, so the engine fans out over every fleet.
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleets-json');
-    echo $out !== '' ? $out : json_encode(['fleets' => []]);
+    echo $out !== '' ? $out : crf_json(['fleets' => []]);
     break;
 
   case 'fleet-create': case 'fleet-delete':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match(CRF_FLEET_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(CRF_FLEET_RE, $n)) { echo crf_json(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' ' . escapeshellarg($action) . ' ' . escapeshellarg($n));
     $j = last_json($out);
-    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => $action]);
+    echo $j !== '' ? $j : crf_json(['ok' => $rc === 0, 'action' => $action]);
     break;
 
   case 'fleet-rename':
     $n = $_REQUEST['name'] ?? '';
-    if (!preg_match(CRF_FLEET_RE, $n)) { echo json_encode(['ok'=>false,'error'=>'bad fleet name']); break; }
+    if (!preg_match(CRF_FLEET_RE, $n)) { echo crf_json(['ok'=>false,'error'=>'bad fleet name']); break; }
     [$out, $rc] = run_json(escapeshellarg($SCRIPT) . ' fleet-rename ' . escapeshellarg($fleet) . ' ' . escapeshellarg($n));
     $j = last_json($out);
-    echo $j !== '' ? $j : json_encode(['ok' => $rc === 0, 'action' => 'fleet-rename']);
+    echo $j !== '' ? $j : crf_json(['ok' => $rc === 0, 'action' => 'fleet-rename']);
     break;
 
   default:
     http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'unknown action']);
+    echo crf_json(['ok' => false, 'error' => 'unknown action']);
 }

@@ -30,10 +30,12 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
 # cold daemon.
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
+  '[ "${START_DOCKER_SERVICE:-false}" = true ] || exec "$@"' \
   '# supervise dockerd: it can die under the services: workload (nested overlay)' \
   '( while true; do docker info >/dev/null 2>&1 || { rm -f /var/run/docker.pid; service docker start >>/var/log/dockerd.log 2>&1; }; sleep 3; done ) &' \
   '# wait for first readiness before the runner accepts jobs' \
   'for i in $(seq 1 90); do docker info >/dev/null 2>&1 && break; sleep 1; done' \
+  'docker info >/dev/null 2>&1 || { echo "Docker did not become ready within 90 seconds" >&2; exit 1; }' \
   'exec "$@"' \
   > /usr/local/bin/wait-docker.sh \
  && chmod +x /usr/local/bin/wait-docker.sh

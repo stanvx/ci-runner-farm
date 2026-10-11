@@ -1,0 +1,13 @@
+import {readFileSync} from 'node:fs';
+import assert from 'node:assert/strict';
+const page=readFileSync('src/usr/local/emhttp/plugins/ci-runner-farm/RunnerFarmFleet.page','utf8');
+const fn=page.match(/function crfHealth\(f\)\{[\s\S]*?\n\}/)[0];
+const health=new Function(`${fn}; return crfHealth;`)();
+assert.equal(health({mode:'scale-set',running:0,configured:1,listener_running:true,listener_ready:true}),'ready');
+assert.equal(health({mode:'scale-set',running:0,listener_running:true,listener_ready:true,capacity_blocked:true}),'waiting');
+assert.equal(health({mode:'scale-set',running:0,listener_running:false}),'stopped');
+assert.equal(health({mode:'scale-set',running:1,configured:4,listener_running:true,listener_ready:true}),'healthy');
+assert.equal(health({mode:'legacy',running:1,configured:4}),'degraded');
+assert.equal(health({mode:'scale-set',running:0,listener_running:true,listener_ready:false}),'starting');
+assert.equal(health({draining_to:'new'}),'active');
+console.log('fleet-health: OK');

@@ -61,3 +61,14 @@ jobs:
 
       - name: Fleet resolution
         run: bash tests/fleet-resolve.sh
+
+      - name: Resource admission, recovery and upstream safety
+        run: |
+          bash tests/host-memory.sh
+          bash tests/validate.sh
+          bash tests/swap-limits.sh
+          bash tests/numeric-config.sh
+          bash tests/supervision.sh
+          bash tests/boot-log.sh
+          node tests/fleet-health.mjs
+          bash tests/upstream-safety.sh

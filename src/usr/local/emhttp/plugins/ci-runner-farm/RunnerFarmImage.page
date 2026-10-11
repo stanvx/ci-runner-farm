@@ -56,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jdk-
  && unzip -q /tmp/actools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools" \
  && mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest" \
  && rm /tmp/actools.zip \
- && yes | sdkmanager --licenses >/dev/null \
+ && (yes || :) | sdkmanager --licenses >/dev/null \
  && sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 # <<< ci-runner-farm toolchain: android <<<
 DFBLOCK;

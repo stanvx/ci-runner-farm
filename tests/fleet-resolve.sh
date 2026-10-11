@@ -164,6 +164,10 @@ chmod +x "$tmpd/bin/docker"
 MANAGED_LABEL="net.unraid.ci-runner-farm.managed=true"
 FLEET_LABEL="net.unraid.ci-runner-farm.fleet"
 FARM_LOG="$tmpd/farm.log"
+CFGDIR="$tmpd"
+autoscale_stop() { :; }
+imageupdate_stop() { :; }
+scaleset_stop() { :; }
 log() { :; }
 
 rename_fixture() { # <fleet> <container count>

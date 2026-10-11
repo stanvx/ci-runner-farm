@@ -18,4 +18,7 @@
 # Detached so we never block Unraid's start sequence.
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
 CFGDIR="/boot/config/plugins/ci-runner-farm"
+. "$PLGDIR/include/boot-log.sh"
+crf_bound_boot_log "$CFGDIR/boot.log"
+"$PLGDIR/include/runner-farm.sh" supervise-install >/dev/null 2>&1
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$CFGDIR/boot.log" 2>&1 & ) || true

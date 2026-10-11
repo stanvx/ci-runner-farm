@@ -15,12 +15,12 @@ derived from it:
 | `CHANGELOG.md` | release-please | newest section is copied into the `.plg` `<CHANGES>` block |
 | `VERSION` | `prepare-plugin-release-pr` job | mirror for tooling |
 | `ci-runner-farm.plg` | `prepare-plugin-release-pr` job | committed, version-stamped |
-| `ci-runner-farm.tgz` | never committed | rebuilt reproducibly at validate + publish |
-| `crf-scalesetd` | never committed | Go listener, rebuilt reproducibly at validate + publish |
+| `ci-runner-farm.tgz` | never committed | built reproducibly during validation |
+| `crf-scalesetd` | never committed | Go listener, built reproducibly during validation |
 
 **Never hand-edit `VERSION` or `ci-runner-farm.plg`.** A release-PR job
-overwrites both, and `release.yml` fails the release if they disagree with the
-tag. To change a version, change the commit types you merge — not these files.
+overwrites both; `release.yml` independently regenerates them from the tagged
+manifest and verifies the resulting assets. To change a version, change the commit types you merge — not these files.
 
 ## The flow
 
@@ -37,30 +37,35 @@ tag. To change a version, change the commit types you merge — not these files.
    `chore(release): prepare plugin metadata`.
 4. **Review the release PR** — see the checklist below.
 5. **Merge it.** release-please tags `vX.Y.Z` and cuts the GitHub Release.
-6. **`validate-plugin-release`** runs `release.yml` against the tag. It refuses
-   the release unless every invariant below holds.
-7. **`publish-plugin-release`** rebuilds the `.tgz` and `crf-scalesetd`, re-checks
-   both MD5s against the committed `.plg`, and uploads `ci-runner-farm.plg`, the
-   version-pinned `ci-runner-farm-<version>.tgz`, and the version-pinned
-   `crf-scalesetd-<version>` to the Release.
+6. **`validate-plugin-release`** runs `release.yml` against the tag. It verifies
+   the manifest matches the tag and regenerates the descriptor with the tag's
+   commit time and build number zero, so a stale preview metadata commit cannot
+   break publication. It checks every invariant below and preserves all three
+   validated assets in a CI artifact.
+7. **`publish-plugin-release`** uploads those exact validated bytes: the package,
+   then the daemon, then the `.plg`. Each asset must download anonymously and
+   compare byte-for-byte before the next upload. A newer push cannot cancel an
+   active publication.
 
 ## Invariants enforced by `release.yml`
 
 A release cannot publish unless all of these hold at the tag:
 
+- the tagged manifest version matches the tag
 - tag matches `^v[0-9]+\.[0-9]+\.[0-9]+(-…)?$`
 - `<!ENTITY pluginVersion>` == the tag without its leading `v`
 - `<!ENTITY releaseTag>` == the tag
 - `<!ENTITY version>` matches `YYYY.MM.DD.HHMM.BUILD-<semver>` and ends in that exact SemVer
 - `VERSION` == the tag without its leading `v`
 - the `.plg` parses as XML
-- the `.tgz` rebuilt from the tagged `src/` has the MD5 the committed `.plg` advertises
+- the `.tgz` rebuilt from the tagged `src/` has the MD5 the generated `.plg` advertises
 - `diff -r` of that `.tgz` against `src/usr/local/emhttp/plugins/ci-runner-farm` is clean
-- `crf-scalesetd` rebuilt from the tagged `daemon/` has the MD5 the committed `.plg` advertises
+- `crf-scalesetd` rebuilt from the tagged `daemon/` has the MD5 the generated `.plg` advertises
 
-The last three are the important ones: together they prove the published `.plg`
-fetches a package and a binary whose bytes are exactly the tagged source. They
-only hold because `build-plg.sh` builds reproducibly — pinned `--sort=name`,
+The package-content and checksum checks prove the published `.plg` fetches a
+package and a binary built from the tagged source. Publishing consumes the exact
+validated artifact, rather than rebuilding independently. Deterministic retries
+still require reproducible builds from `build-plg.sh` — pinned `--sort=name`,
 `--mtime`, ownership, and `gzip -9n`. Those flags are applied **only under GNU
 tar**, so a `.plg` built on macOS must never be committed. Let CI build it.
 
@@ -83,16 +88,17 @@ would ship a non-executable daemon.
 
 Both are built by `build-plg.sh` (`--tgz-only` / `--daemon-only` rebuild one
 each). The listener is built
-`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -buildid='`
+`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid='`
 for exactly one target — Unraid 6.12+ is x86_64 and the daemon only shells out to
 `runner-farm.sh` and speaks HTTPS, so it needs no libc and no build matrix. The
-toolchain is pinned by the `toolchain` directive in `daemon/go.mod` plus a
-SHA-pinned `actions/setup-go`.
+Go version comes from the `go 1.25.3` directive in `daemon/go.mod`, read by
+SHA-pinned `actions/setup-go`; there is no `toolchain` directive.
 
 `package-plugins.yml`'s `daemon` job proves reproducibility directly: it builds
 the listener, rebuilds it from a different absolute path with a cold build cache,
-and `cmp`s the two. Carrying the binary between workflow runs as an artifact was
-rejected — that is exactly the shortcut by which a `.tgz` ends up committed.
+and `cmp`s the two. The release workflow carries the already-validated package,
+daemon, and descriptor between jobs in that same workflow run. These generated
+assets remain outside Git.
 
 Dependabot watches `daemon/` but **ignores `github.com/actions/scaleset`**: it is
 a public-preview module whose interfaces move, so an automated bump lands a PR
@@ -115,8 +121,8 @@ that does not compile. Upgrade it deliberately, in a PR that touches code.
 
 Note that the metadata commit is pushed with `GITHUB_TOKEN`, and GitHub does not
 re-trigger workflows for token-authored pushes. **The `VERSION` + `.plg` commit is
-therefore not covered by the PR's own CI run** — `release.yml` re-checks it after
-tagging instead, but review that diff rather than trusting a green PR.
+therefore not covered by the PR's own CI run** — `release.yml` rebuilds from the tagged source and manifest after
+tagging instead. Review the preview diff rather than trusting a green PR.
 
 ## Fork releases
 
@@ -153,5 +159,10 @@ verification on machines that already downloaded the package. Ship a forward fix
 merge a `fix:` commit and let the next release supersede it.
 
 If validation fails after tagging, the Release exists but has no assets attached,
-so nothing is installable yet. Fix `main`, then re-run `release.yml` via
-`workflow_dispatch` with the tag, or cut a new patch release.
+so nothing is installable yet. A standalone `release.yml` dispatch validates and
+preserves artifacts but does not publish them. For a transient failure, rerun only
+the failed jobs of the original Release Please run (`gh run rerun RUN_ID --failed`)
+so validation/publishing retain the successful release job's tag outputs. Rerunning
+all jobs can make release-please see the existing release and skip publication.
+For a source defect, fix `main` and cut a new patch release; dispatching
+an old tag still builds the old source.
