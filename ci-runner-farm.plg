@@ -2,16 +2,16 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name          "ci-runner-farm">
 <!ENTITY author        "Lime Technology">
-<!ENTITY version       "2026.07.26.1404.15-1.9.2">
-<!ENTITY pluginVersion "1.9.2">
-<!ENTITY releaseTag    "v1.9.2">
+<!ENTITY version       "2026.10.11.0648.18-1.9.3">
+<!ENTITY pluginVersion "1.9.3">
+<!ENTITY releaseTag    "v1.9.3">
 <!ENTITY pluginURL     "https://github.com/stanvx/ci-runner-farm/releases/latest/download/ci-runner-farm.plg">
-<!ENTITY packageName   "ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz">
-<!ENTITY packageURL    "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.2/ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz">
-<!ENTITY packageMD5    "d2fb0a05b95d5d2969812820956d6def">
-<!ENTITY daemonName    "crf-scalesetd-2026.07.26.1404.15-1.9.2">
-<!ENTITY daemonURL     "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.2/crf-scalesetd-2026.07.26.1404.15-1.9.2">
-<!ENTITY daemonMD5     "e159723e9195bccac3f7e0cf545072b3">
+<!ENTITY packageName   "ci-runner-farm-2026.10.11.0648.18-1.9.3.tgz">
+<!ENTITY packageURL    "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.3/ci-runner-farm-2026.10.11.0648.18-1.9.3.tgz">
+<!ENTITY packageMD5    "7beceb8f4b8f1f074dbf792f3c7d3904">
+<!ENTITY daemonName    "crf-scalesetd-2026.10.11.0648.18-1.9.3">
+<!ENTITY daemonURL     "https://github.com/stanvx/ci-runner-farm/releases/download/v1.9.3/crf-scalesetd-2026.10.11.0648.18-1.9.3">
+<!ENTITY daemonMD5     "130ac6c273082d9a1a7c360071889446">
 <!ENTITY plgdir        "/usr/local/emhttp/plugins/&name;">
 <!ENTITY cfgdir        "/boot/config/plugins/&name;">
 ]>
@@ -26,7 +26,8 @@
 <CHANGES>
 ### &version;
 ### Bug Fixes
-* make plugin config saves durable ([#27](https://github.com/stanvx/ci-runner-farm/issues/27)) ([bdec258](https://github.com/stanvx/ci-runner-farm/commit/bdec2585c3c2afd2c0a7e9015a093075eab9d2ff))
+* make plugin config saves durable ([#29](https://github.com/stanvx/ci-runner-farm/issues/29)) ([41d25e3](https://github.com/stanvx/ci-runner-farm/commit/41d25e393b77fce974db3ae4f85e281d3b7bbca6))
+* recover runner fleets and enforce host resource budgets ([#31](https://github.com/stanvx/ci-runner-farm/issues/31)) ([41d1a60](https://github.com/stanvx/ci-runner-farm/commit/41d1a60b2d0766325310b3d5a27190eec59c502a))
 </CHANGES>
 
 <!-- plugin package: Unraid downloads it to flash and verifies the MD5 -->
@@ -52,13 +53,13 @@ CFGDIR="/boot/config/plugins/ci-runner-farm"
 mkdir -p "$CFGDIR" "$PLGDIR"
 # Sweep older downloaded assets off flash, keeping this build's package + daemon.
 find "$CFGDIR" -maxdepth 1 \( \
-     -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz' -o \
-     -name 'crf-scalesetd-*'   ! -name 'crf-scalesetd-2026.07.26.1404.15-1.9.2' \
+     -name 'ci-runner-farm-*.tgz' ! -name 'ci-runner-farm-2026.10.11.0648.18-1.9.3.tgz' -o \
+     -name 'crf-scalesetd-*'   ! -name 'crf-scalesetd-2026.10.11.0648.18-1.9.3' \
      \) -delete 2>/dev/null || true
 # Extract ONLY into the plugin dir; --no-same-owner forces root ownership;
 # --no-overwrite-dir leaves existing dir metadata alone. System dirs untouched.
 # The .tgz is kept on flash so the on-boot reinstall works without a download.
-tar -xzf "$CFGDIR/ci-runner-farm-2026.07.26.1404.15-1.9.2.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
+tar -xzf "$CFGDIR/ci-runner-farm-2026.10.11.0648.18-1.9.3.tgz" --no-same-owner --no-overwrite-dir -C "$PLGDIR"
 chown -R root:root "$PLGDIR"
 find "$PLGDIR" -type d -exec chmod 0755 {} +
 find "$PLGDIR" -type f -exec chmod 0644 {} +
@@ -69,7 +70,7 @@ chmod 0755 "$PLGDIR/include/runner-farm.sh"
 # The listener arrives as its own <FILE> download, not in the tarball, so it needs
 # its own install + mode: the 0644 pass above only walks what the tarball extracted.
 mkdir -p "$PLGDIR/bin"
-install -m 0755 "$CFGDIR/crf-scalesetd-2026.07.26.1404.15-1.9.2" "$PLGDIR/bin/crf-scalesetd"
+install -m 0755 "$CFGDIR/crf-scalesetd-2026.10.11.0648.18-1.9.3" "$PLGDIR/bin/crf-scalesetd"
 # Config defaults are NOT seeded to flash — the settings page and runner-farm.sh
 # both fall back to built-in defaults, so flash only ever holds what the user set.
 [ -f "$CFGDIR/Dockerfile" ] || cp "$PLGDIR/default.Dockerfile" "$CFGDIR/Dockerfile"
@@ -104,13 +105,16 @@ EOF_CACHEDIRS
   fi
 fi
 ( docker pull myoung34/github-runner:latest >/dev/null 2>&1 & ) || true
+. "$PLGDIR/include/boot-log.sh"
+crf_bound_boot_log "$CFGDIR/boot.log"
+"$PLGDIR/include/runner-farm.sh" supervise-install >/dev/null 2>&1 || true
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
 # blocking. No-op until a GitHub token is configured.
 ( nohup "$PLGDIR/include/runner-farm.sh" boot-autostart >>"$CFGDIR/boot.log" 2>&1 & ) || true
 echo ""
 echo "+=============================================================+"
-echo "| ci-runner-farm 2026.07.26.1404.15-1.9.2 installed.                         "
+echo "| ci-runner-farm 2026.10.11.0648.18-1.9.3 installed.                         "
 echo "| Settings > Utilities > CI Runner Farm                        "
 echo "| Set a GitHub PAT, then Start (or Validate without a token).  "
 echo "+=============================================================+"
@@ -122,7 +126,9 @@ echo "+=============================================================+"
 <INLINE><![CDATA[
 PLGDIR="/usr/local/emhttp/plugins/ci-runner-farm"
 CFGDIR="/boot/config/plugins/ci-runner-farm"
-"$PLGDIR/include/runner-farm.sh" stop 2>/dev/null || true
+"$PLGDIR/include/runner-farm.sh" stop-all 2>/dev/null || true
+rm -f "$CFGDIR/ci-runner-farm.cron"
+update_cron 2>/dev/null || true
 rm -rf "$PLGDIR"
 # The downloaded package + daemon are just caches; drop them. Config + token stay.
 rm -f "$CFGDIR"/ci-runner-farm-*.tgz "$CFGDIR"/crf-scalesetd-*
