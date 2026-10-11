@@ -160,9 +160,9 @@ $host_mem_gb = (int)round(((int)preg_replace('/[^0-9]/', '', (string)shell_exec(
   .crf-credential-test:disabled{opacity:.55;cursor:wait}
   /* Health colours. Colour carries HEALTH ONLY — mode is a badge with no colour of
      its own, so "legacy" never reads as a warning. */
-  .crf-h-healthy{background:var(--crf-ok)}
-  .crf-h-active{background:var(--crf-info)}
-  .crf-h-degraded{background:var(--crf-busy)}
+  .crf-h-healthy,.crf-h-ready{background:var(--crf-ok)}
+  .crf-h-active,.crf-h-starting{background:var(--crf-info)}
+  .crf-h-degraded,.crf-h-waiting{background:var(--crf-busy)}
   .crf-h-failed{background:var(--crf-err)}
   .crf-h-stopped{background:var(--disabled-text-color,#888)}
   .crf-shell{display:flex;align-items:flex-start;gap:14px}
@@ -316,12 +316,17 @@ window.CRF_FLEETS=[];
    reads it and the 30s fleet-list poller can call that before this script has finished
    executing — a `let` in its original place would be in the temporal dead zone. */
 let crfCfgDirty=false;
-const CRF_HEALTH_LABEL={healthy:'Healthy',active:'Handing over',degraded:'Degraded',failed:'Failed',stopped:'Stopped'};
+const CRF_HEALTH_LABEL={healthy:'Healthy',active:'Handing over',degraded:'Degraded',failed:'Failed',ready:'Ready',starting:'Starting listener',waiting:'Waiting for memory',stopped:'Stopped'};
 /* Colour means health only. `active` (blue) is a fleet mid-handover: it is doing
    something deliberate, not something wrong, so it must not read as degraded. */
 function crfHealth(f){
   if(f.draining_to) return 'active';
   const run=+f.running||0, cfg=+f.configured||0;
+  if(f.mode==='scale-set' && f.listener_running){
+    if(!f.listener_ready) return 'starting';
+    if(run===0) return f.capacity_blocked ? 'waiting' : 'ready';
+    return 'healthy';
+  }
   if(run===0) return 'stopped';
   return run<cfg ? 'degraded' : 'healthy';
 }
@@ -367,13 +372,13 @@ function crfRenderIdentity(){
     // Mid-handover the engine refuses to refill this fleet (cmd_start resumes the
     // drain instead), so offering Start here would be a button that does nothing.
     if(f.draining_to){ p.textContent='Handing over…'; p.setAttribute('disabled',''); }
-    else { p.removeAttribute('disabled'); p.textContent=(+f.running||0)===0?'Start fleet':'Stop fleet'; }
+    else { p.removeAttribute('disabled'); p.textContent=((+f.running||0)===0&&!f.listener_running)?'Start fleet':'Stop fleet'; }
   }
 }
 function crfPrimary(){
   const f=window.CRF_FLEETS.find(x=>x.name===crfFleet())||{};
   if(f.draining_to) return;
-  crfAction((+f.running||0)===0?'start':'stop');
+  crfAction(((+f.running||0)===0&&!f.listener_running)?'start':'stop');
 }
 function crfMenuOpen(v){
   const m=document.getElementById('crf-menu'), b=document.getElementById('crf-menu-btn');
@@ -703,7 +708,7 @@ function crfRefresh(){
     // than the fleet list — fold the live counts in so the header can't sit on a
     // stale "Stopped" for half a minute after a Start.
     const me=window.CRF_FLEETS.find(x=>x.name===crfFleet());
-    if(me){ me.running=up; me.configured=d.configured??me.configured; crfRenderIdentity(); crfRenderRail(); }
+    if(me){ me.running=up; me.listener_running=!!d.listener_running; me.listener_ready=!!d.listener_ready; me.capacity_blocked=!!d.capacity_blocked; me.configured=d.configured??me.configured; crfRenderIdentity(); crfRenderRail(); }
     // The engine ships `autoscale` as one pre-formatted string: "off" or
     // autoscale_status() ("running (pid N)" / "stopped"), with "[MIN-MAX, buffer N]"
     // appended in EVERY case (runner-farm.sh:1934) — so test the prefix, never equality.
@@ -757,9 +762,11 @@ function crfRefresh(){
     const odr=window.CRF_DRAWER&&document.querySelector('.crf-bay-drawer[data-for="'+window.CRF_DRAWER+'"]');
     if(odr){ window.CRF_DRAWER_PINNED=crfDrawerPinned(odr); window.CRF_DRAWER_SCROLL=odr.scrollTop; }
     if(!rs.length){
+      const listening=ssOn&&d.listener_running, ready=!!d.listener_ready;
       tb.innerHTML='<div class="crf-empty"><span class="crf-ball"></span>'+
-        '<div><strong>No managed runners</strong><div class="crf-muted">Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.</div></div>'+
-        '<uui-button size="sm"'+(crfDark()?' class="dark"':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button></div>';
+        '<div><strong>'+(listening?(!ready?'Starting listener':d.capacity_blocked?'Waiting for host memory':'Ready for jobs'):'No managed runners')+'</strong><div class="crf-muted">'+
+        (listening?(!ready?'Connecting to GitHub. See the fleet log for progress.':d.capacity_blocked?'Jobs will start automatically when memory is available.':'Runners start when GitHub assigns a job.'):'Configured for '+crfEsc(d.configured||0)+' — start the fleet to register them with GitHub.')+'</div></div>'+
+        (listening?'':'<uui-button size="sm"'+(crfDark()?' class="dark"':'')+' onclick="crfAction(\'start\')">Start the fleet</uui-button>')+'</div>';
       return;
     }
     // In-place fast-path: rebuilding crf-bays-body's innerHTML every 5s drops keyboard

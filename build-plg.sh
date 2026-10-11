@@ -232,6 +232,9 @@ EOF_CACHEDIRS
   fi
 fi
 ( docker pull myoung34/github-runner:latest >/dev/null 2>&1 & ) || true
+. "\$PLGDIR/include/boot-log.sh"
+crf_bound_boot_log "\$CFGDIR/boot.log"
+"\$PLGDIR/include/runner-farm.sh" supervise-install >/dev/null 2>&1 || true
 # Bring the fleet + autoscaler up. Runs on manual install AND on every boot
 # (rc.local reinstalls plugins), detached so it waits for dockerd+array without
 # blocking. No-op until a GitHub token is configured.
@@ -250,7 +253,9 @@ echo "+=============================================================+"
 <INLINE><![CDATA[
 PLGDIR="/usr/local/emhttp/plugins/${NAME}"
 CFGDIR="/boot/config/plugins/${NAME}"
-"\$PLGDIR/include/runner-farm.sh" stop 2>/dev/null || true
+"\$PLGDIR/include/runner-farm.sh" stop-all 2>/dev/null || true
+rm -f "\$CFGDIR/ci-runner-farm.cron"
+update_cron 2>/dev/null || true
 rm -rf "\$PLGDIR"
 # The downloaded package + daemon are just caches; drop them. Config + token stay.
 rm -f "\$CFGDIR"/${NAME}-*.tgz "\$CFGDIR"/${DAEMON}-*

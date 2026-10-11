@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,9 +28,8 @@ const (
 	// sweep is a docker ps plus removals, and the fleet lock it takes is only
 	// otherwise contested by a UI action.
 	sweepInterval = 60 * time.Second
-	// sessionBackoff bounds the reconnect loop. There is NO watchdog (ADR-0002),
-	// so the daemon must survive a GitHub outage on its own rather than dying and
-	// waiting for something to restart it.
+	// Session recovery belongs here; the minute supervisor only recovers process
+	// death and must not restart a listener that is backing off a GitHub outage.
 	sessionBackoffMin = 5 * time.Second
 	sessionBackoffMax = 5 * time.Minute
 	// drainPoll is how often the drain phase re-checks for finished containers.
@@ -49,12 +50,15 @@ type listener struct {
 	// lastMessageID survives a session rebuild on purpose: resetting it to 0 made
 	// the new session replay messages this daemon had already acted on.
 	lastMessageID int
+	desiredJobs   int
 
 	// unhealthy latches when the engine reports a hard failure. Provisioning
 	// stops and capacity is advertised as zero, but the process stays up: a fleet
 	// that reports degraded in the UI is far easier to diagnose than a daemon
 	// that vanished.
-	unhealthy atomic.Bool
+	unhealthy     atomic.Bool
+	readyMu       sync.Mutex
+	sessionActive bool
 }
 
 // runListener is the `run --fleet <name>` subcommand.
@@ -93,17 +97,9 @@ func runListener(ctx context.Context, fleet string, log *slog.Logger) error {
 	if runDir == "" {
 		runDir = defaultRunDir
 	}
-	blobDir := filepath.Join(runDir, "jit")
-	// Purge before recreating. A SIGKILL between writeBlob and the engine's rm -f,
-	// or a failed os.Remove on a jit-start that never happened, leaves a 0600 file
-	// that decodes to a runner's RSA private key sitting on tmpfs until reboot.
-	// Safe with runners live: their bind-mount pins the inode, so dropping the
-	// directory entry does not disturb a running job.
-	if err := os.RemoveAll(blobDir); err != nil {
-		return fmt.Errorf("clearing %s: %w", blobDir, err)
-	}
-	if err := os.MkdirAll(blobDir, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", blobDir, err)
+	blobDir, err := prepareBlobDir(runDir, fleet)
+	if err != nil {
+		return err
 	}
 
 	l := &listener{cfg: cfg, eng: eng, client: client, scaleSet: scaleSet, log: log, runDir: blobDir}
@@ -117,11 +113,29 @@ func runListener(ctx context.Context, fleet string, log *slog.Logger) error {
 	go l.sweepLoop(ctx)
 	l.serve(ctx)
 
-	// ctx is already cancelled here, so the drain gets an uncancelled one: every
-	// call it makes bounds itself, and a cancelled ctx would fail the force-remove
-	// that ADR-0004 depends on.
+	// Drain after cancellation with a fresh context so cleanup can still run.
 	l.drain(context.WithoutCancel(ctx), l.drainTimeout())
 	return nil
+}
+
+func prepareBlobDir(runDir, fleet string) (string, error) {
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`).MatchString(fleet) {
+		return "", fmt.Errorf("invalid fleet name %q", fleet)
+	}
+	blobDir := filepath.Join(runDir, "jit", fleet)
+	// Purge before recreating. A SIGKILL between writeBlob and the engine's rm -f,
+	// or a failed os.Remove on a jit-start that never happened, leaves a 0600 file
+	// that decodes to a runner's RSA private key sitting on tmpfs until reboot.
+	// Safe with runners live: their bind-mount pins the inode, so dropping the
+	// directory entry does not disturb a running job.
+	if err := os.RemoveAll(blobDir); err != nil {
+		return "", fmt.Errorf("clearing %s: %w", blobDir, err)
+	}
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
+		return "", fmt.Errorf("creating %s: %w", blobDir, err)
+	}
+
+	return blobDir, nil
 }
 
 func (l *listener) drainTimeout() time.Duration {
@@ -135,10 +149,9 @@ func (l *listener) drainTimeout() time.Duration {
 }
 
 // startupRetry retries a startup step instead of exiting the process. Exit 75 is
-// NORMAL per the engine contract (a contended fleet lock), and nothing restarts
-// this daemon by design (ADR-0002), so exiting on one leaves the fleet silently
-// acquiring no work until a human notices. Every attempt logs at ERROR, which is
-// the signal the UI tails; only ctx cancellation ends the loop.
+// NORMAL per the engine contract (a contended fleet lock). Retry in-process rather
+// than making the minute supervisor restart a healthy daemon. Every attempt logs
+// at ERROR, which is the signal the UI tails; only ctx cancellation ends the loop.
 func startupRetry[T any](ctx context.Context, log *slog.Logger, what string, fn func() (T, error)) (T, error) {
 	backoff := sessionBackoffMin
 	for attempt := 1; ; attempt++ {
@@ -186,7 +199,13 @@ func (l *listener) session(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening message session: %w", err)
 	}
+	if err := l.setSessionReady(true); err != nil {
+		l.log.Warn("recording authenticated session readiness", "err", err)
+	}
 	defer func() {
+		if err := l.setSessionReady(false); err != nil {
+			l.log.Warn("clearing authenticated session readiness", "err", err)
+		}
 		// Closing the session is how the daemon stops being offered work: GitHub
 		// will not assign jobs to a scale set with no live session. That is the
 		// zero-capacity advertisement, and it must happen even on a cancelled ctx.
@@ -196,6 +215,8 @@ func (l *listener) session(ctx context.Context) error {
 			l.log.Warn("closing message session", "err", err)
 		}
 	}()
+	l.updateDesired(sc.Session().Statistics)
+	l.scale(ctx)
 
 	for {
 		if ctx.Err() != nil {
@@ -211,6 +232,7 @@ func (l *listener) session(ctx context.Context) error {
 			return err
 		}
 		if msg == nil {
+			l.scale(ctx)
 			continue // long poll expired with nothing queued
 		}
 
@@ -228,17 +250,61 @@ func (l *listener) session(ctx context.Context) error {
 	}
 }
 
-// capacity is derived from jit-list rather than from a counter, for the same
-// reason reconcile is: containers are the only state, and an in-memory count
-// would drift from reality the first time a runner was removed from the UI.
+// This tmpfs sentinel is UI telemetry, never runner reconciliation state.
+func (l *listener) setSessionReady(ready bool) error {
+	l.readyMu.Lock()
+	defer l.readyMu.Unlock()
+	l.sessionActive = ready
+	return l.writeReadiness()
+}
+
+func (l *listener) setUnhealthy(unhealthy bool) error {
+	l.readyMu.Lock()
+	defer l.readyMu.Unlock()
+	l.unhealthy.Store(unhealthy)
+	return l.writeReadiness()
+}
+
+// Caller holds readyMu so validation cannot recreate readiness after close.
+func (l *listener) writeReadiness() error {
+	if l.runDir == "" {
+		return nil
+	}
+	path := filepath.Join(l.runDir, "listener-ready")
+	if l.sessionActive && !l.unhealthy.Load() {
+		return os.WriteFile(path, nil, 0o600)
+	}
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// GitHub expects total capacity including runners already serving assignments.
 func (l *listener) capacity(ctx context.Context) int {
-	if l.unhealthy.Load() {
+	if l.unhealthy.Load() || ctx.Err() != nil {
 		return 0
+	}
+	return l.cfg.MaxRunners
+}
+
+func (l *listener) updateDesired(stats *scaleset.RunnerScaleSetStatistic) {
+	if stats != nil {
+		l.desiredJobs = min(l.cfg.MaxRunners, max(0, stats.TotalAssignedJobs))
+	}
+}
+
+// Reconcile on reconnect and poll timeout too: assignments can predate startup
+// or repeat, so messages alone cannot say how many runners are still needed.
+func (l *listener) scale(ctx context.Context) {
+	if l.unhealthy.Load() || ctx.Err() != nil {
+		return
 	}
 	runners, err := l.eng.JitList(ctx)
 	if err != nil {
-		l.log.Warn("could not read jit-list, advertising no capacity", "err", err)
-		return 0
+		l.log.Warn("could not reconcile runner count", "err", err)
+		return
 	}
 	busy := 0
 	for _, r := range runners {
@@ -246,19 +312,19 @@ func (l *listener) capacity(ctx context.Context) int {
 			busy++
 		}
 	}
-	if free := l.cfg.MaxRunners - busy; free > 0 {
-		return free
+	for i := busy; i < l.desiredJobs && ctx.Err() == nil; i++ {
+		if !l.provision(ctx) {
+			return
+		}
 	}
-	return 0
 }
 
 func (l *listener) handle(ctx context.Context, sc *scaleset.MessageSessionClient, msg *scaleset.RunnerScaleSetMessage) {
 	if len(msg.JobAvailableMessages) > 0 {
 		l.acquire(ctx, sc, msg.JobAvailableMessages)
 	}
-	for _, job := range msg.JobAssignedMessages {
-		l.provision(ctx, job)
-	}
+	l.updateDesired(msg.Statistics)
+	l.scale(ctx)
 	for _, job := range msg.JobStartedMessages {
 		l.log.Info("job started", "runner", job.RunnerName, "job", job.JobDisplayName, "repo", job.RepositoryName)
 	}
@@ -287,16 +353,15 @@ func (l *listener) acquire(ctx context.Context, sc *scaleset.MessageSessionClien
 	l.log.Info("acquired jobs", "offered", len(ids), "acquired", len(acquired))
 }
 
-func (l *listener) provision(ctx context.Context, job *scaleset.JobAssigned) {
+func (l *listener) provision(ctx context.Context) bool {
 	if l.unhealthy.Load() {
-		l.log.Error("fleet is unhealthy, not provisioning", "job", job.JobDisplayName)
-		return
+		return false
 	}
 
 	name, err := runnerName(l.cfg.ScaleSetName)
 	if err != nil {
 		l.log.Error("generating runner name", "err", err)
-		return
+		return false
 	}
 
 	jit, err := l.client.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
@@ -308,7 +373,7 @@ func (l *listener) provision(ctx context.Context, job *scaleset.JobAssigned) {
 	}, l.scaleSet.ID)
 	if err != nil {
 		l.log.Error("minting JIT config", "runner", name, "err", err)
-		return
+		return false
 	}
 	// Guard before the blob is written: the runner name is the container label
 	// that joins back to GitHub, and dereferencing a nil Runner panicked the whole
@@ -316,22 +381,22 @@ func (l *listener) provision(ctx context.Context, job *scaleset.JobAssigned) {
 	// remove either, so there is nothing to clean up but the log line.
 	if jit == nil || jit.Runner == nil || jit.Runner.Name == "" {
 		l.log.Error("GitHub returned a JIT config with no runner reference", "runner", name)
-		return
+		return false
 	}
 
 	blob, err := l.writeBlob(jit.EncodedJITConfig)
 	if err != nil {
 		l.log.Error("writing JIT config", "runner", name, "err", err)
 		l.removeMinted(ctx, jit)
-		return
+		return false
 	}
 
 	err = retryBusy(ctx, l.log, "jit-start", func() error {
 		return l.eng.JitStart(ctx, blob, jit.Runner.Name)
 	})
 	if err == nil {
-		l.log.Info("started runner", "runner", jit.Runner.Name, "job", job.JobDisplayName, "repo", job.RepositoryName)
-		return
+		l.log.Info("started runner", "runner", jit.Runner.Name)
+		return true
 	}
 
 	// The engine unlinks the blob only on success, so an unstarted runner leaves
@@ -342,11 +407,14 @@ func (l *listener) provision(ctx context.Context, job *scaleset.JobAssigned) {
 	l.removeMinted(ctx, jit)
 
 	if errors.Is(err, errEngineFatal) {
-		l.unhealthy.Store(true)
+		if readyErr := l.setUnhealthy(true); readyErr != nil {
+			l.log.Warn("clearing unhealthy fleet readiness", "err", readyErr)
+		}
 		l.log.Error("engine hard failure, fleet marked unhealthy and provisioning stopped", "err", err)
-		return
+		return false
 	}
 	l.log.Error("could not start runner, GitHub will re-offer the job", "runner", name, "err", err)
+	return false
 }
 
 // removeMinted drops the GitHub-side record for a runner that never started.
@@ -400,8 +468,23 @@ func (l *listener) sweepLoop(ctx context.Context) {
 			if err := l.eng.Sweep(ctx); err != nil && ctx.Err() == nil {
 				l.log.Warn("periodic sweep", "err", err)
 			}
+			l.recoverHealth(ctx)
 		}
 	}
+}
+
+func (l *listener) recoverHealth(ctx context.Context) {
+	if !l.unhealthy.Load() || ctx.Err() != nil {
+		return
+	}
+	if _, err := l.eng.output(ctx, "validate"); err != nil {
+		l.log.Warn("fleet still unhealthy, validation failed", "err", err)
+		return
+	}
+	if err := l.setUnhealthy(false); err != nil {
+		l.log.Warn("recording recovered fleet readiness", "err", err)
+	}
+	l.log.Info("fleet recovered after successful provisioning validation")
 }
 
 // drain lets in-flight jobs finish after SIGTERM, then force-removes whatever is

@@ -175,6 +175,8 @@ timeout_value() {
 # belongs to exactly one list (config-parity.sh asserts it).
 GLOBAL_KEYS="CACHE_ROOT SHARED_IMAGE_CACHE MIRROR_PORT REGISTRY_SERVER \
 REGISTRY_USERNAME DASHBOARD_WIDGET_ENABLE"
+CFG_NUMERIC_KEYS="RUNNER_COUNT MIRROR_PORT AUTOSCALE_MIN AUTOSCALE_MAX AUTOSCALE_MIN_IDLE AUTOSCALE_STEP AUTOSCALE_INTERVAL AUTOSCALE_IDLE_GRACE IMAGE_AUTOUPDATE_INTERVAL IMAGE_DRAIN_TIMEOUT SCALESET_DRAIN_TIMEOUT"
+
 FLEET_KEYS="GH_SCOPE GH_OWNER GH_REPOS RUNNER_GROUP RUNNER_COUNT RUNNER_LABELS \
 RUNNER_CPUS RUNNER_MEMORY WORK_TMPFS_SIZE IMAGE_SOURCE IMAGE EPHEMERAL \
 RUN_AS_ROOT CACHE_MOUNTS SHARE_DOCKER_SOCK DIND \
@@ -199,6 +201,11 @@ load_cfg_file() {
     case "$key" in *[!A-Za-z0-9_]*|'') continue;; esac
     case " $allow " in *" $key "*) ;; *) continue;; esac
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+    case " ${CFG_NUMERIC_KEYS:-} " in *" $key "*)
+      case "$val" in ''|*[!0-9]*|0[0-9]*) printf 'load_cfg: ignoring non-numeric %s\n' "$key" >&2; continue ;; esac
+      [ "${#val}" -le 9 ] || { printf 'load_cfg: ignoring oversized %s\n' "$key" >&2; continue; }
+      ;;
+    esac
     printf -v "$key" '%s' "$val"
   done < "$file"
 }
@@ -236,6 +243,7 @@ FW_TAG="${FW_TAG}:${FLEET}"
 AUTOSCALE_PID="${RUNDIR}/autoscale${FSFX}.pid"
 IMAGEUPDATE_PID="${RUNDIR}/imageupdate${FSFX}.pid"
 SCALESET_PID="${RUNDIR}/scaleset${FSFX}.pid"
+STOPPED_FILE="${CFGDIR}/stopped-${FLEET}"
 AUTOSCALE_STATE="${RUNDIR}/autoscale${FSFX}.state"
 # autoscale + reconcile log, and now also the scale-set listener's — it appends here so
 # the existing farm-log tail (and the UI panel reading it) shows the daemon with no change.
@@ -407,6 +415,8 @@ autoscale_tick() {
   cur=$(current_count); busy=$(busy_count); idle=$((cur - busy))
   statef="$AUTOSCALE_STATE"; over=0
   [ -f "$statef" ] && over=$(cat "$statef" 2>/dev/null || echo 0)
+  case "$over" in ''|*[!0-9]*|0[0-9]*) over=0 ;; esac
+  [ "${#over}" -le 9 ] || over=0
 
   # runner churn (crash, reap, or ephemeral exit) can drop the fleet below the
   # floor between ticks; the grow branch below only ever adds STEP to the
@@ -490,10 +500,7 @@ autoscale_status() {
 # autoscale daemon's — same pidfile-on-tmpfs, same fleet-scoped pkill, same log file —
 # so there is exactly one supervision shape in this plugin to reason about.
 #
-# There is NO watchdog: nothing here restarts a dead listener. A supervisor that
-# silently respawns a crashlooping daemon turns a visible fault into an invisible one
-# (jobs just queue forever); the UI reports the listener as stopped instead, and the
-# daemon owns its own reconnect backoff for the transient failures that deserve one.
+# The minute supervisor recovers process death; explicit Stop persists across boots.
 scaleset_start() {
   [ "$FLEET_MODE" = "scale-set" ] || return 0
   # An empty name would have the listener create/attach to a set no `runs-on:` targets,
@@ -510,11 +517,12 @@ scaleset_start() {
   # The closes are wrapped in a { } group carrying its OWN 2>/dev/null: `exec` with
   # redirections and no command applies them PERMANENTLY to the shell, so a bare
   # `exec ... 2>/dev/null` would survive into the exec'd Go binary and send every slog
-  # line to /dev/null. With no watchdog (see above), that log IS the fault report the UI
+  # line to /dev/null. That log is the fault report the UI
   # shows — the group scopes the redirect to the closes and the listener inherits FARM_LOG.
   nohup sh -c '{ exec 8>&- 7>&- 9>&- 6>&-; } 2>/dev/null || true; exec "$0" run --fleet "$1"' \
     "$SCALESETD" "$FLEET" >>"$FARM_LOG" 2>&1 &
   echo $! > "$SCALESET_PID"
+  rm -f "$STOPPED_FILE"
   log "scale-set listener started (pid $(cat "$SCALESET_PID"), scale set '$SCALESET_NAME')"
 }
 # $1=force skips the listener's drain (SIGKILL): the Docker-stopping hook uses it
@@ -523,16 +531,11 @@ scaleset_start() {
 # the shutdown. A plain stop sends SIGTERM and lets in-flight jobs finish.
 scaleset_stop() {
   local sig=""; [ "${1:-}" = force ] && sig="-KILL"
-  # Fleet-scoped AND anchored at end of cmdline. Without the trailing $ this is a prefix
-  # match, and fleet names are ^[a-z][a-z0-9-]{0,30}$ — so stopping fleet `dev` would also
-  # kill the listeners of `dev2` and `dev-web`. (autoscale_stop gets away without an anchor
-  # only because "autoscale-daemon" follows the name and anchors it.)
-  local pat="crf-scalesetd run --fleet ${FLEET}\$"
-  # shellcheck disable=SC2086  # $sig is deliberately empty (= default SIGTERM) or -KILL
-  [ -f "$SCALESET_PID" ] && kill $sig "$(cat "$SCALESET_PID")" 2>/dev/null
+  # A reused pidfile can name another service; discover exact fleet argv before
+  # signalling, including listeners whose pidfile vanished.
+  local pid
+  for pid in $(scaleset_pids); do kill $sig "$pid" 2>/dev/null || true; done
   rm -f "$SCALESET_PID"
-  # shellcheck disable=SC2086
-  pkill $sig -f "$pat" 2>/dev/null || true
   [ -n "$sig" ] && return 0                   # force already SIGKILLed — nothing left to drain
   # SIGTERM only STARTS the listener's drain: it keeps its GitHub session and its
   # containers for up to SCALESET_DRAIN_TIMEOUT. Returning now would let cmd_start spawn a
@@ -541,20 +544,58 @@ scaleset_stop() {
   # a wedged listener must not block Start forever either.
   local waited=0 limit
   limit=$(( $(timeout_value "${SCALESET_DRAIN_TIMEOUT:-}" 600) + 30 ))
-  while pgrep -f "$pat" >/dev/null 2>&1; do
+  while [ -n "$(scaleset_pids)" ]; do
     if [ "$waited" -ge "$limit" ]; then
       err "scale-set listener for fleet $FLEET still alive ${limit}s after SIGTERM — killing it"
-      pkill -KILL -f "$pat" 2>/dev/null || true
+      for pid in $(scaleset_pids); do kill -KILL "$pid" 2>/dev/null || true; done
       break
     fi
     sleep 1; waited=$((waited+1))
   done
   return 0
 }
+scaleset_pids() {
+  local pid args
+  ps -eo pid=,args= 2>/dev/null | while read -r pid args; do
+    [ "$args" = "$SCALESETD run --fleet $FLEET" ] && printf '%s\n' "$pid"
+  done
+  return 0
+}
 scaleset_status() {
-  if [ -f "$SCALESET_PID" ] && kill -0 "$(cat "$SCALESET_PID" 2>/dev/null)" 2>/dev/null; then
-    echo "running (pid $(cat "$SCALESET_PID"))"
-  else echo "stopped"; fi
+  local pid; pid="$(scaleset_pids)"; pid="${pid%%$'\n'*}"
+  if [ -n "$pid" ]; then echo "running (pid $pid)"; else echo stopped; fi
+}
+
+trim_farm_log() {
+  [ -f "$FARM_LOG" ] || return 0
+  local bytes tmp
+  bytes="$(wc -c < "$FARM_LOG")" || return 0
+  [ "$bytes" -gt 4194304 ] || return 0
+  tmp="$(mktemp "${FARM_LOG}.XXXXXX")" || return 0
+  # Keep the inode: renaming the log strands the listener's open append fd.
+  tail -c 262144 "$FARM_LOG" > "$tmp" && cat "$tmp" > "$FARM_LOG"
+  rm -f "$tmp"
+}
+
+cmd_supervise() {
+  trim_farm_log
+  [ "$FLEET_MODE" = scale-set ] && [ -n "$SCALESET_NAME" ] || return 0
+  [ ! -f "$STOPPED_FILE" ] && [ -z "$(drain_target)" ] || return 0
+  case "$(scaleset_status)" in running*) return 0 ;; esac
+  docker info >/dev/null 2>&1 && check_cache_root >/dev/null 2>&1 || return 0
+  with_fleet_lock try _supervise_one
+}
+_supervise_one() {
+  [ ! -f "$STOPPED_FILE" ] && [ -z "$(drain_target)" ] || return 0
+  [ "$FLEET" = default ] || [ -f "$(cfg_path)" ] || return 0
+  case "$(scaleset_status)" in running*) return 0 ;; esac
+  log "supervisor: restarting stopped scale-set listener for $FLEET"
+  cmd_start >>"$FARM_LOG" 2>&1
+}
+cmd_supervise_install() {
+  # update_cron rebuilds Unraid's plugin crontab; never replace unrelated entries.
+  printf '* * * * * /usr/local/emhttp/plugins/ci-runner-farm/include/runner-farm.sh supervise >/dev/null 2>&1\n' > "$CFGDIR/ci-runner-farm.cron" || return 1
+  update_cron
 }
 
 # ---- image auto-update -----------------------------------------------------
@@ -902,7 +943,7 @@ _registry_login() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CACHE_ROOT/work"
+  mkdir -p "$CACHE_ROOT/work" || return 1
   local m dir
   for m in $CACHE_MOUNTS; do
     [ -n "$m" ] || continue
@@ -915,7 +956,7 @@ ensure_dirs() {
     # the 'runner' user can populate it. (Re-owning an existing cache after a
     # RUN_AS_ROOT flip is a one-time 'prune-cache', not a silent chown -R of live data.)
     [ -d "$dir" ] && continue
-    mkdir -p "$dir" || { err "could not create cache dir '$dir'"; continue; }
+    mkdir -p "$dir" || { err "could not create cache dir '$dir'"; return 1; }
     [ "$RUN_AS_ROOT" != "true" ] && chown -R "$RUNNER_UID:$RUNNER_GID" "$dir" 2>/dev/null || true
   done
   write_dind_config
@@ -1175,7 +1216,7 @@ build_args() {
     ARGS+=( -v "$hostdir:${m#*:}" )
   done
   [ -n "$RUNNER_CPUS" ]   && ARGS+=( --cpus="$RUNNER_CPUS" )
-  [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" )
+  [ -n "$RUNNER_MEMORY" ] && ARGS+=( --memory="$RUNNER_MEMORY" --memory-swap="$RUNNER_MEMORY" )
   # network isolation: put the runner on the dedicated bridge (off = default bridge)
   [ "$NETWORK_ISOLATION" != "off" ] && ARGS+=( --network "$RUNNER_NETWORK" )
   if [ "$DIND" = "true" ]; then
@@ -1216,13 +1257,14 @@ build_args() {
   # /_work tmpfs, labels, --restart=no — is identical in both, so this stays one
   # function: a second build_args_jit is exactly where a future setting gets added to
   # one mode and silently missed in the other (the same drift crf_confgen warns about).
-  if [ "$FLEET_MODE" = "scale-set" ]; then
+  if [ "${NO_REGISTER:-0}" = "1" ]; then
+    : # Inert validation exercises mounts and limits without runner credentials.
+  elif [ "$FLEET_MODE" = "scale-set" ]; then
     # The blob decodes to the runner's own RSA PRIVATE KEY, so it is passed by PATH and
     # bind-mounted read-only — never as an env var, which any job step could read back
     # out of its own /proc or the container's .Config.Env. cmd_jit_start unlinks the
     # host file the moment `docker run` returns; the mount keeps the inode alive.
-    # Guarded so the paths that build a runner WITHOUT one (recycle, validate) fail
-    # loudly here rather than starting a container that would idle unregistered.
+    # Actual provisioning must have a JIT config so no runner idles unregistered.
     [ -n "${JITCONFIG_FILE:-}" ] || { err "a scale-set runner can only be created from a JIT config (jit-start), not recycled or hand-started"; return 1; }
     ARGS+=(
       --label "net.unraid.ci-runner-farm.gh-runner-name=${GH_RUNNER_NAME:-}"
@@ -1269,7 +1311,9 @@ start_one() {
 }
 _run_one() {
   host_cap_ok || return 1                       # box-wide ceiling, checked per container
-  docker run "${ARGS[@]}" >/dev/null
+  local id
+  id="$(docker run "${ARGS[@]}")" || return 1
+  crf_limit_swap "$id" || { docker rm -f "$id" >/dev/null; return 1; }
 }
 
 # Recreate a stopped managed runner with a FRESH registration token. We cannot
@@ -1320,8 +1364,8 @@ start_stopped_managed() {
 # (cmd_scale runs its own lighter inline subset and is intentionally not a caller.)
 provision_base() {
   check_cache_root || return 1
-  ensure_dirs
-  ensure_network
+  ensure_dirs || return 1
+  ensure_network || return 1
   ensure_mirror
   registry_login || return 1
 }
@@ -1392,13 +1436,74 @@ host_fleet_usage() {
 # second literal is how the manual path and the daemon path end up disagreeing.
 HARD_MAX=64
 HOST_MAX=64
+crf_swap_file() {
+  local pid cg
+  pid="$(docker inspect -f '{{.State.Pid}}' "$1")" || return 1
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  cg="$(awk -F: '$1 == "0" {print $3}' "/proc/$pid/cgroup" 2>/dev/null)"
+  [ -n "$cg" ] && [ "$cg" != / ] || return 1
+  printf '/sys/fs/cgroup%s/memory.swap.max' "$cg"
+}
+crf_limit_swap() {
+  local swap_file
+  swap_file="$(crf_swap_file "$1")" || swap_file=""
+  if [ -n "$swap_file" ] && [ -f "$swap_file" ]; then
+    # Unraid Docker can report no swap support even with writable v2 controls.
+    printf '0\n' > "$swap_file" && [ "$(cat "$swap_file")" = 0 ] && return 0
+  elif [ "$(docker info --format '{{.SwapLimit}}' 2>/dev/null)" = true ]; then
+    return 0 # cgroup v1: Docker enforces --memory-swap equal to --memory.
+  fi
+  err "could not enforce zero runner swap; refusing an unbounded runner"
+  return 1
+}
+crf_memory_bytes() {
+  local amount suffix factor=1
+  [[ "$1" =~ ^([0-9]+)([bB]|[kKmMgGtT][bB]?)?$ ]] || return 1
+  amount="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+  case "${suffix:0:1}" in k|K) factor=1024 ;; m|M) factor=1048576 ;; g|G) factor=1073741824 ;; t|T) factor=1099511627776 ;; esac
+  [ "${#amount}" -le 13 ] || return 1
+  amount=$((10#$amount))
+  [ "$amount" -gt 0 ] && [ "$amount" -le "$((1099511627776 / factor))" ] || return 1
+  echo "$((amount * factor))"
+}
+crf_available_memory() {
+  awk '/^MemAvailable:/ {printf "%.0f", $2 * 1024}' /proc/meminfo
+}
+# Only unreclaimable resident pages are already charged against MemAvailable.
+# shortcut: cgroup v1/unknown layouts reserve the full cap, add a v1 reader if needed.
+crf_resident_memory() {
+  local cg
+  cg="$(awk -F: '$1 == "0" {print $3}' "/proc/$1/cgroup" 2>/dev/null)"
+  [ -n "$cg" ] && [ -r "/sys/fs/cgroup${cg}/memory.stat" ] || return 1
+  awk '$1 == "anon" || $1 == "shmem" || $1 == "kernel" {n += $2} $1 == "slab_reclaimable" {r = $2} END {printf "%.0f", (n > r ? n - r : 0)}' "/sys/fs/cgroup${cg}/memory.stat"
+}
+host_memory_ok() {
+  local requested available ids caps cap pid resident reserved=0
+  requested="$(crf_memory_bytes "$RUNNER_MEMORY")" || { err "set a finite RUNNER_MEMORY cap before provisioning"; return 1; }
+  available="$(crf_available_memory)"
+  [[ "$available" =~ ^[0-9]+$ ]] || { err "could not read host available memory"; return 1; }
+  ids="$(docker ps -q --filter "label=${MANAGED_LABEL}")" || return 1
+  if [ -n "$ids" ]; then
+    caps="$(docker inspect --format '{{.HostConfig.Memory}} {{.State.Pid}}' $ids)" || return 1
+    while read -r cap pid; do
+      [[ "$cap" =~ ^[0-9]+$ ]] && [ "$cap" -gt 0 ] || { err "an existing runner has no finite memory cap"; return 1; }
+      resident="$(crf_resident_memory "$pid")" || resident=0
+      [[ "$resident" =~ ^[0-9]+$ ]] || resident=0
+      [ "$resident" -le "$cap" ] || resident="$cap"
+      reserved=$((reserved + cap - resident))
+    done <<< "$caps"
+  fi
+  [ "$available" -ge "$((requested + reserved + 2147483648))" ] && return 0
+  err "host memory busy: available=$available requested=$requested reserved=$reserved host_reserve=2147483648 bytes; waiting for capacity"
+  return 1
+}
 host_cap_ok() {
   local total; total="$(host_managed_count)"
-  [ "${total:-0}" -lt "$HOST_MAX" ] && return 0
+  if [ "${total:-0}" -lt "$HOST_MAX" ]; then host_memory_ok; return $?; fi
   err "host runner cap reached: $total managed runner(s) across all fleets (HOST_MAX=$HOST_MAX). In use: $(host_fleet_usage)— scale another fleet down first"
   return 1
 }
-cmd_restart() { cmd_stop; cmd_start; }
+cmd_restart() { cmd_stop && cmd_start; }
 
 # Operator convenience: (re)start the shared image cache + regenerate the runner DinD
 # config to match — WITHOUT a full fleet Start/Restart (useful after changing
@@ -1434,7 +1539,7 @@ reconcile_stale_runners() {
     # Busy/starting runners are left for a later pass.
     case "$(runner_state "$c")" in idle|error) ;; *) continue ;; esac
     log "reconcile: $c predates a config change — recycling it onto the current config"
-    if ! cmd_recycle "$c" >/dev/null 2>&1; then
+    if ! cmd_recycle "$c" >/dev/null; then
       if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
         log "reconcile: recycle of $c failed but it is still present — will retry next pass"
       else
@@ -1557,6 +1662,7 @@ cmd_start() {
     done
     cmd_sweep
     scaleset_start || return 1
+    rm -f "$STOPPED_FILE"
     # No autoscale daemon here, deliberately: GitHub tells us how many runners it wants,
     # so AUTOSCALE_MIN/MAX are meaningless and scale_down_idle is actively wrong — it
     # would delete a runner that GitHub had just assigned a job to. No image-update
@@ -1571,6 +1677,7 @@ cmd_start() {
   [ "$AUTOSCALE" = "true" ] && startn="$AUTOSCALE_MIN"
   local i
   for i in $(seq 1 "$startn"); do start_one "$i"; done
+  rm -f "$STOPPED_FILE"
   log "fleet up: $(managed_names | wc -l) runner(s)"
   [ "$AUTOSCALE" = "true" ] && autoscale_start
   [ "$IMAGE_AUTOUPDATE" = "true" ] && imageupdate_start
@@ -1716,7 +1823,12 @@ cmd_jit_start() {
 }
 _jit_run_one() {
   host_cap_ok || return "$EX_TEMPFAIL"   # box-wide ceiling, checked under the same hold as the run
-  docker run "${ARGS[@]}" >/dev/null; local rc=$?
+  local id rc=0
+  id="$(docker run "${ARGS[@]}")" || rc=$?
+  if [ "$rc" -eq 0 ] && ! crf_limit_swap "$id"; then
+    docker rm -f "$id" >/dev/null
+    rc=1
+  fi
   # Unlink the blob the moment `docker run` returns, whether it succeeded or not: the
   # bind mount already holds the inode, so the container reads it normally and the
   # inode is freed when the container is removed. This is what stops a listener that
@@ -1804,6 +1916,7 @@ cmd_jit_list() {
 # token — so a later Start rebuilds the container with its cache warm; only the
 # container is removed here, not the cached layers.
 cmd_stop() {
+  : > "$STOPPED_FILE" || return 1
   autoscale_stop
   imageupdate_stop
   # Stop the listener FIRST so it cannot mint a replacement for a runner we are about to
@@ -1864,7 +1977,8 @@ cmd_scale() {
   # Guard the cache-root shape BEFORE ensure_dirs runs mkdir/chown under it — on every
   # scale path (down/same, not just up), so an unsafe CACHE_ROOT never gets provisioned.
   crf_safe_cache_root >/dev/null 2>&1 || { err "refusing to scale: CACHE_ROOT ($CACHE_ROOT) is unsafe — point it at a dedicated subdir under /mnt/<pool>, not a bare pool/disk/share root or system dir"; return 1; }
-  ensure_dirs; registry_login
+  ensure_dirs || return 1
+  registry_login || return 1
   local current; current="$(managed_names | wc -l)"
   if [ "$target" -gt "$current" ]; then
     [ -z "$ACCESS_TOKEN" ] && { err "no token configured"; return 1; }
@@ -2216,6 +2330,10 @@ cmd_recycle() {
     log "recycle: $name removed but its replacement failed to start (idx=$idx)"
     echo '{"ok":false,"error":"removed but not recreated"}'; return 1
   fi
+  if ! crf_limit_swap "$name"; then
+    docker rm -f "$name" >/dev/null
+    echo '{"ok":false,"error":"cannot enforce runner swap limit"}'; return 1
+  fi
   echo '{"ok":true}'
 }
 
@@ -2353,7 +2471,7 @@ cmd_status_json() {
   # public_repo_problem inline here: on a cold/expired cache that would run the
   # per-repo GitHub curls on the poll's own response path and stall it.
   local sec; sec="$(cat "$SEC_CACHE" 2>/dev/null | json_escape)"
-  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"fleet_mode\":\"$(echo "$FLEET_MODE" | json_escape)\",\"scaleset\":\"$(echo "$ss" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},\"runners\":${out}}"
+  echo "{\"count\":$(echo "$names" | grep -c . ),\"configured\":${RUNNER_COUNT},\"token\":$([ -n "$ACCESS_TOKEN" ] && echo true || echo false),\"autoscale\":\"${as} [${AUTOSCALE_MIN}-${AUTOSCALE_MAX}, buffer ${AUTOSCALE_MIN_IDLE}]\",\"image_autoupdate\":\"$(echo "$iu" | json_escape)\",\"fleet_mode\":\"$(echo "$FLEET_MODE" | json_escape)\",\"scaleset\":\"$(echo "$ss" | json_escape)\",\"warning\":\"${warn}\",\"security\":\"${sec}\",\"stale\":${stalec},$(fleet_health_json),\"runners\":${out}}"
 }
 
 # Aggregate-only status for the Main -> Dashboard nchan widget: {count,up,busy,idle}.
@@ -2442,11 +2560,20 @@ cmd_fleets_json() {
   printf '{"fleets":[%s]}\n' "$out"
 }
 # One fleet's entry, emitted in the resolved context of that fleet.
+fleet_health_json() {
+  local alive=false ready=false blocked=false
+  case "$(scaleset_status)" in running*) alive=true ;; esac
+  [ "$alive" = true ] && [ -f "$RUNDIR/jit/$FLEET/listener-ready" ] && ready=true
+  if [ "$FLEET_MODE" = scale-set ] && [ "$alive" = true ]; then
+    host_memory_ok >/dev/null 2>&1 || blocked=true
+  fi
+  printf '"listener_running":%s,"listener_ready":%s,"capacity_blocked":%s' "$alive" "$ready" "$blocked"
+}
 cmd_fleet_entry_json() {
-  printf '{"name":"%s","mode":"%s","configured":%s,"running":%s,"draining_to":"%s"}' \
+  printf '{"name":"%s","mode":"%s","configured":%s,"running":%s,"draining_to":"%s",%s}' \
     "$(printf '%s' "$FLEET" | json_escape)" "$(printf '%s' "$FLEET_MODE" | json_escape)" \
     "${RUNNER_COUNT:-0}" "$(managed_running_names | grep -c .)" \
-    "$(printf '%s' "$(drain_target)" | json_escape)"
+    "$(printf '%s' "$(drain_target)" | json_escape)" "$(fleet_health_json)"
 }
 
 # Create an empty fleet: just its cfg file. Empty means "every default", exactly like a
@@ -2485,7 +2612,7 @@ drain_target() {
 # gone: both fleets are real and fully resolvable the whole way through, and capacity
 # moves across one runner at a time (see cmd_fleet_drain_rename).
 cmd_fleet_rename() {
-  local old="$1" new="$2" n
+  local old="$1" new="$2" n stopped=0
   [ "$old" = default ] && { echo '{"ok":false,"error":"fleet default cannot be renamed (it is the legacy config path)"}'; return 1; }
   printf '%s' "$new" | grep -qE '^[a-z][a-z0-9-]{0,30}$' || { echo '{"ok":false,"error":"invalid fleet name"}'; return 1; }
   [ "$new" = default ] && { echo '{"ok":false,"error":"fleet default always exists"}'; return 1; }
@@ -2495,9 +2622,16 @@ cmd_fleet_rename() {
   # the same containers with different targets. One at a time.
   [ -n "$(drain_target "$old")" ] && { echo "{\"ok\":false,\"error\":\"fleet is already being renamed to $(drain_target "$old") — wait for that handover to finish\"}"; return 1; }
   n="$(fleet_container_count "$old")"
+  [ -f "${CFGDIR}/stopped-${old}" ] && stopped=1
   if [ "${n:-0}" -eq 0 ]; then
+    # Zero containers can still have a live listener. Stop it before moving its
+    # config, or two fleet names attach to the same GitHub scale set.
+    : > "${CFGDIR}/stopped-${old}" || return 1
+    autoscale_stop; imageupdate_stop; scaleset_stop
+    if [ "$stopped" = 1 ]; then : > "${CFGDIR}/stopped-${new}" || return 1; else rm -f "${CFGDIR}/stopped-${new}"; fi
     mv "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not move the fleet config"}'; return 1; }
     [ -f "${FLEETDIR}/${old}.Dockerfile" ] && mv "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
+    rm -f "${CFGDIR}/stopped-${old}"
     log "fleet renamed: $old -> $new"
     echo "{\"ok\":true,\"action\":\"fleet-rename\",\"fleet\":\"$(printf '%s' "$new" | json_escape)\"}"
     return 0
@@ -2506,6 +2640,7 @@ cmd_fleet_rename() {
   # draining, or a crash between the two leaves a fleet handing over to a fleet that
   # does not exist.
   cp "$(cfg_path "$old")" "$(cfg_path "$new")" || { echo '{"ok":false,"error":"could not copy the fleet config"}'; return 1; }
+  [ "$stopped" = 0 ] || : > "${CFGDIR}/stopped-${new}"
   [ -f "${FLEETDIR}/${old}.Dockerfile" ] && cp "${FLEETDIR}/${old}.Dockerfile" "${FLEETDIR}/${new}.Dockerfile"
   printf '%s\n' "$new" > "${FLEETDIR}/${old}.draining" || { rm -f "$(cfg_path "$new")" "${FLEETDIR}/${new}.Dockerfile"; echo '{"ok":false,"error":"could not mark the fleet as draining"}'; return 1; }
   log "fleet rename: $old -> $new, handing over $n runner(s) as they go idle"
@@ -2539,7 +2674,7 @@ cmd_fleet_drain_rename() {
   if [ "$FLEET_MODE" = "scale-set" ]; then
     scaleset=1
     scaleset_stop
-    "$0" --fleet "$target" start >>"$FARM_LOG" 2>&1
+    [ -f "${CFGDIR}/stopped-${target}" ] || "$0" --fleet "$target" start >>"$FARM_LOG" 2>&1
   fi
   # Match cmd_start's sizing rule so the new fleet lands on the size it would have been
   # started at, not RUNNER_COUNT while autoscaling wants the floor.
@@ -2560,7 +2695,7 @@ cmd_fleet_drain_rename() {
     done
     # Skipped in scale-set mode: the target's listener was started above and refills from
     # GitHub's own demand, and cmd_scale refuses on a scale-set fleet anyway.
-    if [ "$retired" = 1 ] && [ "$scaleset" = 0 ]; then
+    if [ "$retired" = 1 ] && [ "$scaleset" = 0 ] && [ ! -f "${CFGDIR}/stopped-${target}" ]; then
       want=$(( $(fleet_container_count "$target") + 1 ))
       [ "$want" -le "$cap" ] && "$0" --fleet "$target" scale "$want" >>"$FARM_LOG" 2>&1
     fi
@@ -2578,7 +2713,7 @@ cmd_fleet_drain_rename() {
   # rules and this fleet's isolated network (it leaves the shared mirror alone while the
   # new fleet is using it), then retire the config that kept the fleet resolvable.
   with_fleet_lock wait cmd_stop >>"$FARM_LOG" 2>&1
-  rm -f "$(cfg_path "$FLEET")" "${FLEETDIR}/${FLEET}.Dockerfile" "${FLEETDIR}/${FLEET}.draining"
+  rm -f "$(cfg_path "$FLEET")" "${FLEETDIR}/${FLEET}.Dockerfile" "${FLEETDIR}/${FLEET}.draining" "$STOPPED_FILE"
   log "fleet renamed: $FLEET -> $target (handover complete)"
 }
 
@@ -2590,7 +2725,9 @@ cmd_fleet_delete() {
   [ -f "$(cfg_path "$name")" ] || { echo '{"ok":false,"error":"no such fleet"}'; return 1; }
   n="$(fleet_container_count "$name")"
   [ "${n:-0}" -gt 0 ] && { echo "{\"ok\":false,\"error\":\"fleet still has $n container(s) — stop it first\"}"; return 1; }
-  rm -f "$(cfg_path "$name")" "${FLEETDIR}/${name}.Dockerfile" "${FLEETDIR}/${name}.draining"
+  : > "${CFGDIR}/stopped-${name}" || return 1
+  autoscale_stop; imageupdate_stop; scaleset_stop
+  rm -f "$(cfg_path "$name")" "${FLEETDIR}/${name}.Dockerfile" "${FLEETDIR}/${name}.draining" "${CFGDIR}/stopped-${name}"
   log "fleet deleted: $name"
   echo "{\"ok\":true,\"action\":\"fleet-delete\",\"fleet\":\"$(printf '%s' "$name" | json_escape)\"}"
 }
@@ -2601,33 +2738,42 @@ cmd_validate() {
   # Prove the provisioning mechanics WITHOUT a GitHub token: launch the image
   # with an inert entrypoint, verify mounts/limits, then tear it down.
   check_cache_root || return 1
-  ensure_dirs
-  registry_login
+  ensure_dirs || return 1
+  registry_login || return 1
   local name="${NAME_PREFIX}-validate"
   docker rm -f "$name" >/dev/null 2>&1
   local NO_REGISTER=1               # validate swaps the entrypoint for a sleep — never registers
-  build_args 99 "$name"
+  build_args 99 "$name" || return 1
   # swap real entrypoint for an inert sleep so no registration is attempted
   local injected=(); local a; local eimg; eimg="$(effective_image)"
   for a in "${ARGS[@]}"; do
     [ "$a" = "$eimg" ] && injected+=( --entrypoint /bin/sh "$eimg" -c "sleep 30" ) || injected+=( "$a" )
   done
   log "validate: launching inert container to verify mounts/limits..."
-  local errf; errf="$(mktemp /tmp/crf-validate.XXXXXX)"
+  local errf; errf="$(mktemp "$RUNDIR/crf-validate.XXXXXX")" || return 1
+  local rc=0
   if ! docker run "${injected[@]}" >/dev/null 2>"$errf"; then
-    err "docker run failed:"; cat "$errf" >&2; rm -f "$errf"; return 1
+    err "docker run failed:"; cat "$errf" >&2; rc=1
+  elif ! {
+    [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ] &&
+    crf_limit_swap "$name" &&
+    echo "--- resource limits ---" &&
+    docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name" &&
+    echo "--- mounts ---" &&
+    docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name" &&
+    echo "--- tmpfs ---" &&
+    docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name" &&
+    echo "--- docker.sock reachable inside container ---" &&
+    docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
+  }; then
+    err "validate: container stopped or a provisioning check failed"; rc=1
   fi
   rm -f "$errf"
-  echo "--- resource limits ---"
-  docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}}' "$name"
-  echo "--- mounts ---"
-  docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$name"
-  echo "--- tmpfs ---"
-  docker inspect -f '{{json .HostConfig.Tmpfs}}' "$name"
-  echo "--- docker.sock reachable inside container ---"
-  docker exec "$name" sh -c '[ -S /var/run/docker.sock ] && echo "yes: docker.sock present" || echo "no socket"' 2>/dev/null
-  docker rm -f "$name" >/dev/null 2>&1
-  [ -n "$name" ] && [ -n "$CACHE_ROOT" ] && rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || true
+  docker rm -f "$name" >/dev/null 2>&1 || rc=1
+  if [ -n "$name" ] && [ -n "$CACHE_ROOT" ]; then
+    rm -rf "$CACHE_ROOT/docker/$name" 2>/dev/null || rc=1
+  fi
+  [ "$rc" = 0 ] || { err "validate: failed (cleanup attempted)"; return 1; }
   log "validate: OK (container removed). Provisioning mechanics verified on this host."
 }
 
@@ -2738,6 +2884,8 @@ cmd_build_image() {
 # ones, and (re)starts the autoscale daemon, so the fleet self-heals after a
 # reboot OR a Docker restart.
 cmd_boot_autostart() {
+  [ ! -f "$STOPPED_FILE" ] || { log "boot-autostart: fleet explicitly stopped — skipping"; return 0; }
+  case "$(scaleset_status)" in running*) return 0 ;; esac
   # Same exemption as cmd_start: a scale-set fleet may authenticate with a GitHub App
   # credential and have no PAT at all, so an empty token is not "unconfigured" there.
   [ -n "$ACCESS_TOKEN" ] || [ "$FLEET_MODE" = "scale-set" ] || { log "boot-autostart: no token configured yet — skipping"; return 0; }
@@ -2753,7 +2901,12 @@ cmd_boot_autostart() {
   # uses: on a Docker-service restart (no reboot) the autoscale/image daemons may
   # still be alive and ticking, so an unlocked cmd_start here would race them into
   # duplicate 'docker run's. The long readiness wait above stays OUTSIDE the lock.
-  with_fleet_lock wait cmd_start
+  with_fleet_lock wait _boot_start_if_enabled
+}
+_boot_start_if_enabled() {
+  [ ! -f "$STOPPED_FILE" ] || return 0
+  case "$(scaleset_status)" in running*) return 0 ;; esac
+  cmd_start
 }
 
 # Verbs invoked WITHOUT an explicit --fleet that must cover the whole box: boot brings
@@ -2763,6 +2916,7 @@ case "${1:-status}" in
   start)        with_fleet_lock wait cmd_start ;;
   boot-autostart)   if [ "$FLEET_EXPLICIT" = 1 ]; then cmd_boot_autostart; else for_each_fleet boot-autostart; fi ;;
   stop)         with_fleet_lock wait cmd_stop ;;
+  stop-all)     for_each_fleet stop ;;
   restart)      with_fleet_lock wait cmd_restart ;;
   mirror-up)    with_fleet_lock wait cmd_mirror_up ;;
   scale)        with_fleet_lock wait cmd_scale "${2:?usage: scale <N>}" ;;
@@ -2771,15 +2925,21 @@ case "${1:-status}" in
   dashboard-json) cmd_dashboard_json ;;
   dashboard-counts) dashboard_counts ;;
   fleets-json)  cmd_fleets_json ;;
+  supervise)    if [ "$FLEET_EXPLICIT" = 1 ]; then cmd_supervise; else for_each_fleet supervise; fi ;;
+  supervise-install) cmd_supervise_install ;;
   fleet-entry-json) cmd_fleet_entry_json ;;
   # Lifecycle mutates shared flash state (the fleets/ dir) and guards on a container
   # count, so it takes the host lock: two concurrent renames of one fleet could
   # otherwise both pass the "no containers" check.
   fleet-create) with_host_lock cmd_fleet_create "${2:?usage: fleet-create <name>}" ;;
-  fleet-rename) with_host_lock cmd_fleet_rename "${2:?usage: fleet-rename <old> <new>}" "${3:?usage: fleet-rename <old> <new>}" ;;
+  fleet-rename)
+    [ "$FLEET" = "${2:?usage: fleet-rename <old> <new>}" ] || exec "$0" --fleet "$2" fleet-rename "$2" "${3:?usage: fleet-rename <old> <new>}"
+    with_fleet_lock wait with_host_lock cmd_fleet_rename "$2" "${3:?usage: fleet-rename <old> <new>}" ;;
   # No host lock: this runs for hours and takes the locks it needs per step.
   fleet-drain-rename) cmd_fleet_drain_rename ;;
-  fleet-delete) with_host_lock cmd_fleet_delete "${2:?usage: fleet-delete <name>}" ;;
+  fleet-delete)
+    [ "$FLEET" = "${2:?usage: fleet-delete <name>}" ] || exec "$0" --fleet "$2" fleet-delete "$2"
+    with_fleet_lock wait with_host_lock cmd_fleet_delete "$2" ;;
   # crf-scalesetd boundary. Only jit-start mutates the fleet, so only it takes the
   # fleet lock — in `jit` mode, so a contended lock comes back as 75 (retry) instead of
   # 1 (fleet is broken). Read-only verbs must NOT take it: jit-list runs on the
@@ -2809,7 +2969,7 @@ case "${1:-status}" in
   reconcile-drain)  ( flock -w 5 7 || { echo "reconcile: a drain is already running (it re-reads the cfg each pass and will pick up this change) — skipping duplicate" >>"$FARM_LOG"; exit 0; }; cmd_reconcile_drain ) 7>"$RECONCILE_LOCK" ;;
   logs-tail)    cmd_logs_tail "${2:?usage: logs-tail <name> [n]}" "${3:-150}" ;;
   logs)         cmd_logs "${2:-1}" "${3:-100}" ;;
-  validate)         cmd_validate ;;
+  validate)         with_fleet_lock wait cmd_validate ;;
   build-image)      cmd_build_image ;;
   build-async)      cmd_build_async ;;
   build-status)     cmd_build_status ;;
