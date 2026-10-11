@@ -34,7 +34,10 @@ manifest and verifies the resulting assets. To change a version, change the comm
 3. **`prepare-plugin-release-pr` commits the derived metadata onto that PR**: it
    reads the manifest, writes `VERSION`, runs `INTERNAL_VERSION=$version
    ./build-plg.sh`, and pushes `VERSION` + `ci-runner-farm.plg` as
-   `chore(release): prepare plugin metadata`.
+   `chore(release): prepare plugin metadata`. The trusted main workflow then
+   dispatches Lint and Build Plugin explicitly against the generated release
+   branch. Bot PR-event approval policy remains in place; a bot push or expired
+   PR approval cannot leave the generated head untested.
 4. **Review the release PR** — see the checklist below.
 5. **Merge it.** release-please tags `vX.Y.Z` and cuts the GitHub Release.
 6. **`validate-plugin-release`** runs `release.yml` against the tag. It verifies
@@ -119,10 +122,13 @@ that does not compile. Upgrade it deliberately, in a PR that touches code.
 - `pluginURL` / `packageURL` point at the repo you intend to publish from
   (`build-plg.sh` takes `REPO` from `${{ github.repository }}` in CI).
 
-Note that the metadata commit is pushed with `GITHUB_TOKEN`, and GitHub does not
-re-trigger workflows for token-authored pushes. **The `VERSION` + `.plg` commit is
-therefore not covered by the PR's own CI run** — `release.yml` rebuilds from the tagged source and manifest after
-tagging instead. Review the preview diff rather than trusting a green PR.
+Token-authored metadata pushes do not reliably produce executable PR checks: the
+default token suppresses ordinary push triggers, and bot PR-event runs can require
+approval and expire. The preparation job explicitly dispatches Lint and Build
+Plugin at the generated release branch using a token scoped for Actions dispatch.
+Verify those runs used the current release head before merging. Tagged validation
+still independently regenerates and checks the publishable artifacts. Review the
+preview diff as well as these checks.
 
 ## Fork releases
 
