@@ -42,7 +42,14 @@ The effective screenshot child heap was `-Xmx2g`. Its resident memory reached ap
 
 ## Storage and remaining boundaries
 
-No application data, volume, VM disk or snapshot was deleted. Backups and the previous runner image remain available. At 17:51 Docker reported 5.33 GB reclaimable build cache and only 390 MB reclaimable image storage; the earlier 6.54 GB image estimate is superseded by this live inventory. A bounded cleanup request covers unused build cache older than seven days while retaining 2 GB; it excludes images, rollback images, volumes and application data.
+No application data, volume, VM disk or snapshot was deleted. Backups and the previous runner image remain available. At 17:51 Docker reported 5.33 GB reclaimable build cache and only 390 MB reclaimable image storage; the earlier 6.54 GB image estimate is superseded by this live inventory. After explicit approval, bounded cleanup completed at 18:37 AEDT using Docker 29.5.3 / Buildx v0.34.0:
+
+```sh
+docker buildx prune --builder default --filter until=168h \
+  --reserved-space 2GB --max-used-space 2GB --force
+```
+
+Docker reported **3.664 GB reclaimed**. Build cache decreased from 199 records / 10.57 GB to 146 records / **6.903 GB**, exceeding the approved 2 GB retention floor. All image tags/IDs and volume names/drivers matched their pre-cleanup inventories exactly; rollback images and application data were preserved. The emulator remained running, Seerr healthy, and the authenticated default listener continued its active CI job. This was build-cache cleanup only, not a correction to global swap usage. ZFS available space rose by approximately 1.64 GB during the before/after sample; compressed/shared storage and concurrent writes mean Docker's logical reclamation is not an exact physical-space saving.
 
 Seerr's missing init was corrected in `/boot/config/plugins/compose.manager/projects/seerr/compose.yaml`, with `init: true` and an `exec wget -T 5` healthcheck. A consistent SQLite online backup and both Compose inputs were preserved at `/mnt/user/appdata/overseerr-reliability-backups/20261011-175934/`. The same installed image and all ports/environment/volumes were retained. SQLite integrity passed, PID 1 became `docker-init`, and 4,041 zombies fell to zero, remaining zero through five minutes of healthy checks. This recovers process/kernel resources; it is not a gigabyte RAM-saving claim.
 
