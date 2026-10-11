@@ -57,15 +57,15 @@ Remove the patched source bind when a tested base image fixes the non-idempotent
 
 ### Recovery outcome
 
-The approved SSD correction resolved the flash-permission failure. The emulator guest is running from its persisted AVD; both repeated restarts retained application data. Backups and the original image remain available. The zero-swap guard survives reboot through Unraid cron; it has a first-minute enforcement window after recreation. No host reboot, sustained emulator performance test, or unrelated-service restart was performed.
+The approved SSD correction resolved the flash-permission failure. The emulator guest is running from its persisted AVD; both repeated restarts retained application data. Backups and the original image remain available. The zero-swap guard is persisted for Unraid cron installation at boot; it has a first-minute enforcement window after recreation. No host reboot, sustained emulator performance test, or unrelated-service restart was performed.
 
 ## Storage and unrelated findings
 
 The protected ZFS pool is 90% allocated with 77% fragmentation and 56.6 GiB dataset-available capacity. The pool is healthy; its 11 October scrub reported zero errors. Main consumers: vault 460 GiB; appdata 226 GiB plus 16.6 GiB snapshots; Docker system 112 GiB including 51.3 GiB child datasets; ISOs 30.2 GiB. The SATA pool has 1.18 TiB available. Root RAM filesystem uses 6.1 GiB; host `/tmp` uses 420 MiB; logs use 15 MiB. Temporary files are not the dominant memory issue.
 
-Docker reports 5.33 GB reclaimable build cache and 6.54 GB reclaimable image storage. These are candidates for a separately reviewed, bounded cleanup after deployment/rollback image needs are known. No storage was deleted. An unreferenced 3.337 GB Docker volume may contain retained application data and must not be blindly pruned. ZFS snapshots and vault contents likewise need retention decisions before removal or migration.
+The initial Docker inventory reported 5.33 GB reclaimable build cache and 6.54 GB reclaimable image storage. At 17:51, the live image inventory reported only 390 MB reclaimable; that supersedes the earlier image estimate. Unused build cache older than seven days, retaining at least 2 GB, is the bounded cleanup candidate awaiting confirmation. No storage was deleted. An unreferenced 3.337 GB Docker volume may contain retained application data and must not be blindly pruned. ZFS snapshots and vault contents likewise need retention decisions before removal or migration.
 
-Seerr has approximately 4,037 zombie `wget` children adopted by `npm start`, explaining most of its 4,079 PIDs. These do not consume normal process RSS, but consume process/kernel resources. Its `develop` image and child reaping require a separate bounded fix; no unrelated restart was performed. The `askdit-corpus` container also has a recorded cgroup OOM kill under its 3 GiB cap; it is unrelated to RunnerFarm.
+Initially Seerr had approximately 4,037 zombie `wget` children adopted by `npm start`, explaining most of its 4,079 PIDs. These do not consume normal process RSS, but consume process/kernel resources. At 17:59–18:04, the verified child-reaping fix was applied: its existing Compose service now uses `init: true` and an `exec wget -T 5` healthcheck. Only Seerr was recreated with the same installed image, ports, environment and appdata volume after a consistent SQLite backup. Database integrity passed; PID 1 is now `docker-init`, and zombie count fell from 4,041 to zero, remaining zero over five minutes. Backup/evidence: `/mnt/user/appdata/overseerr-reliability-backups/20261011-175934/`. No image/schema upgrade was performed; kernel/process recovery is small compared with the emulator RAM saving. The `askdit-corpus` container also has a recorded cgroup OOM kill under its 3 GiB cap; it is unrelated to RunnerFarm.
 
 ## Durability recommendations
 
@@ -76,3 +76,26 @@ Seerr has approximately 4,037 zombie `wget` children adopted by `npm start`, exp
 5. Preserve backups, Docker rollback images, volumes, and snapshots during the reliability deployment. Review build cache cleanup and large vault/ISO placement separately; moving data is not a substitute for fixing RAM overcommit.
 
 Primary references: [Linux zram accounting](https://docs.kernel.org/admin-guide/blockdev/zram.html), [Docker resource constraints](https://docs.docker.com/engine/containers/resource_constraints/), and [Docker stats accounting](https://docs.docker.com/reference/cli/docker/container/stats/).
+
+## Final live snapshot — 18:15:29 AEDT, 11 October 2026
+
+A real CI runner was active with a 16 GiB memory ceiling. Host `MemAvailable` was **12.87 GiB** of 78.31 GiB total. Global swap remained effectively full (16 GiB logical allocation; 4 KiB free at collection), but zram's **physical allocation was 5.55 GiB**, holding 15.47 GiB original data compressed into 5.44 GiB payload. Swap's logical size must not be added to physical RAM use. The full gauge alone does not mean disk thrashing: this host uses compressed RAM swap.
+
+| Container | Cgroup RAM | Logical swap | Verified ceiling / events |
+| --- | ---: | ---: | --- |
+| `ci-runner-1` | 7.68 GiB | 0 | Memory 16 GiB; actual swap max 0; OOM/max events 0 |
+| `android-emulator` | 5.51 GiB | 0 | Memory 8 GiB; actual swap max 0; OOM/max events 0 |
+| `firecrawl-api-1` | 2.07 GiB | 0.087 GiB | Memory 12 GiB; swap unlimited |
+| `podly` | 1.68 GiB | 1.27 GiB | Memory/swap unlimited |
+| `kokoro-fastapi` | 1.38 GiB | 1.26 GiB | Memory/swap unlimited |
+| `frigate` | 1.16 GiB | 0.72 GiB | Memory/swap unlimited |
+| `plex` | 0.47 GiB | 1.24 GiB | Memory/swap unlimited |
+| `dispatcharr` | 0.27 GiB | 0.71 GiB | Memory/swap unlimited |
+
+The emulator's cgroup RAM decreased from approximately 11.74 GiB to 5.51 GiB: **approximately 6.23 GiB resident memory recovered**, with its former 1.49 GiB logical container swap also gone. These are separate resident and logical-swap comparisons, not an additive physical-memory saving. Cgroup RAM includes file/kernel charges; the original Docker CLI reading subtracts inactive file cache, so this saving is approximate.
+
+VM PSS remained **11.77 GiB Ubuntu** and **6.10 GiB Home Assistant**, with respectively 0.48 GiB and 0.47 GiB logical proportional swap. These readings overlap neither emulator nor CI container charges, but do not justify guest allocation reductions without fresh guest workload measurements.
+
+An eight-second `vmstat` sample during CI showed swap-in rates of 4, 0, 52, and 76 KiB/s and swap-out rates of 4, 4, 0, and 0 KiB/s. I/O wait was 3–4%. This is small swap activity rather than sustained swap thrashing; the full zram primarily retains cold pages from other workloads. Emergency headroom is nevertheless exhausted, and the observation does not prove that higher CI concurrency is safe. Do not use the first `vmstat` row's since-boot averages as the sampling result.
+
+Host OOM count was **74 since boot**, versus 73 during the original audit; the intervening historical runner failure is recorded separately. The current CI and emulator cgroups both reported zero OOM kills at this snapshot. Seerr remained healthy with **zero zombies and four processes**, approximately ten minutes after its five-minute correction check completed.
