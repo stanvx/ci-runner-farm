@@ -37,6 +37,9 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.pr != '' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
     steps:
       - name: Checkout release PR
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -66,6 +69,8 @@ jobs:
 
       - name: Commit plugin release metadata
         shell: bash
+        env:
+          RELEASE_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
         run: |
           set -euo pipefail
           if [[ -z "$(git status --porcelain)" ]]; then
@@ -76,7 +81,18 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION ci-runner-farm.plg
           git commit -m "chore(release): prepare plugin metadata"
-          git push origin HEAD:${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          git push origin "HEAD:$RELEASE_BRANCH"
+
+      - name: Validate prepared release branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+        run: |
+          set -euo pipefail
+          # Bot-authored pushes do not trigger CI; dispatch after metadata is final.
+          gh workflow run lint.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_BRANCH"
+          gh workflow run package-plugins.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_BRANCH"
 
   validate-plugin-release:
     needs: release-please

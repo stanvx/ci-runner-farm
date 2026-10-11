@@ -81,4 +81,55 @@ else:
         uploaded = (work / 'uploads').read_text().splitlines()
         assert uploaded == (assets[:2] if corrupt else assets), uploaded
         assert (result.returncode != 0) == bool(corrupt), result.stderr
-print('upstream-safety: release metadata race, upload order, anonymous byte verification OK')
+
+commit = shell_step('release-please.yml', 'Commit plugin release metadata')
+dispatch = shell_step('release-please.yml', 'Validate prepared release branch')
+workflow = (ROOT / '.github/workflows/release-please.yml').read_text()
+prepare_job = workflow.split('  prepare-plugin-release-pr:\n', 1)[1].split('  validate-plugin-release:\n', 1)[0]
+assert '    permissions:\n      actions: write\n      contents: write\n' in prepare_job
+assert workflow.count('actions: write') == 1, 'dispatch permission must remain scoped to metadata job'
+assert prepare_job.index('Commit plugin release metadata') < prepare_job.index('Validate prepared release branch')
+assert 'GH_TOKEN: ${{ github.token }}' in prepare_job, 'dispatch uses the trusted workflow token'
+assert prepare_job.count('RELEASE_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}') == 2
+assert '${{' not in commit + dispatch, 'branch expressions must enter shell through environment values'
+
+with tempfile.TemporaryDirectory() as directory:
+    work = Path(directory)
+    bindir = work / 'bin'
+    bindir.mkdir()
+    # Deliberate shell syntax proves the branch is one literal argument, never code.
+    branch = 'release-please--branches--main;$(touch injected)'
+    env = dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'],
+               RELEASE_BRANCH=branch, GITHUB_REPOSITORY='stanvx/ci-runner-farm', GH_TOKEN='test-only-token')
+    mock = '''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+command = pathlib.Path(sys.argv[0]).name
+with pathlib.Path('calls').open('a') as log: log.write(json.dumps([command] + args) + '\\n')
+if command == 'git':
+    if args[0] == 'status' and os.environ['DIRTY'] == '1': print(' M VERSION')
+    if args[0] == 'push' and os.environ['FAIL_PUSH'] == '1': sys.exit(1)
+elif args[2] == 'lint.yml' and os.environ['FAIL_DISPATCH'] == '1': sys.exit(1)
+'''
+    for command in ('git', 'gh'):
+        path = bindir / command
+        path.write_text(mock)
+        path.chmod(0o755)
+    for dirty, fail_push, fail_dispatch in ((1, 0, 0), (0, 0, 0), (1, 1, 0), (1, 0, 1)):
+        (work / 'calls').unlink(missing_ok=True)
+        case_env = dict(env, DIRTY=str(dirty), FAIL_PUSH=str(fail_push), FAIL_DISPATCH=str(fail_dispatch))
+        result = subprocess.run(['bash', '-c', commit], cwd=work, env=case_env, capture_output=True)
+        if result.returncode == 0:
+            result = subprocess.run(['bash', '-c', dispatch], cwd=work, env=case_env, capture_output=True)
+        calls = [json.loads(line) for line in (work / 'calls').read_text().splitlines()]
+        dispatches = [call for call in calls if call[0] == 'gh']
+        expected = [] if fail_push else ['lint.yml'] if fail_dispatch else ['lint.yml', 'package-plugins.yml']
+        assert [call[3] for call in dispatches] == expected, calls
+        for call in dispatches:
+            assert call == ['gh', 'workflow', 'run', call[3], '--repo', 'stanvx/ci-runner-farm', '--ref', branch], call
+        if dirty and not fail_push:
+            push = ['git', 'push', 'origin', 'HEAD:' + branch]
+            assert push in calls and calls.index(push) < calls.index(dispatches[0]), calls
+        assert (result.returncode != 0) == bool(fail_push or fail_dispatch), result.stderr
+        assert not (work / 'injected').exists(), 'branch value was executed as shell code'
+print('upstream-safety: release metadata, verified payloads, automatic prepared-branch dispatch OK')
