@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.3](https://github.com/stanvx/ci-runner-farm/compare/v1.9.2...v1.9.3) (2026-10-11)
+
+
+### Bug Fixes
+
+* make plugin config saves durable ([#29](https://github.com/stanvx/ci-runner-farm/issues/29)) ([41d25e3](https://github.com/stanvx/ci-runner-farm/commit/41d25e393b77fce974db3ae4f85e281d3b7bbca6))
+* recover runner fleets and enforce host resource budgets ([#31](https://github.com/stanvx/ci-runner-farm/issues/31)) ([41d1a60](https://github.com/stanvx/ci-runner-farm/commit/41d1a60b2d0766325310b3d5a27190eec59c502a))
+
 ## [1.9.2](https://github.com/stanvx/ci-runner-farm/compare/v1.9.1...v1.9.2) (2026-07-26)
 
 
