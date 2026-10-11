@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.4](https://github.com/stanvx/ci-runner-farm/compare/v1.9.3...v1.9.4) (2026-10-11)
+
+
+### Bug Fixes
+
+* **ci:** validate generated release branches automatically ([#32](https://github.com/stanvx/ci-runner-farm/issues/32)) ([f54244e](https://github.com/stanvx/ci-runner-farm/commit/f54244edf946f71a9e0ee03fa056e552ffd65d8a))
+
 ## [1.9.3](https://github.com/stanvx/ci-runner-farm/compare/v1.9.2...v1.9.3) (2026-10-11)
 
 
